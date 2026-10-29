@@ -1,0 +1,45 @@
+# Control plane services for the OTA Fleet Manager.
+# Start with:  cp .env.example .env   (then edit the password)
+#              docker compose up -d --build
+# More services (Mosquitto, orchestrator, Grafana) are added in later tasks.
+
+name: ota-fleet-manager
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ota}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-ota}
+    ports:
+      # Bound to localhost only so the database is never reachable from outside the host.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once, the first time the pgdata volume is created.
+      - ./registries/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  software-registry:
+    build: ./registries/software
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Read-only: add or change packages by editing this folder, no rebuild needed.
+      - ./registries/software/packages:/packages:ro
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:
