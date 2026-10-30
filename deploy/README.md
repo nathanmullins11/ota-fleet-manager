@@ -6,8 +6,9 @@ This folder holds the Docker Compose setup for the OTA Fleet Manager control pla
 |---|---|---|
 | `postgres` | Device registry (PostgreSQL 16, schema loaded from `postgres/init.sql`) | 5432 (localhost only) |
 | `software-registry` | Serves versioned firmware packages (FastAPI) | 8080 |
+| `orchestrator` | Listens for device heartbeats over MQTT and records them in `postgres` | none |
 
-More services (Mosquitto, orchestrator, Grafana) are added to the same Compose file in later tasks.
+More services (Mosquitto, Grafana) are added to the same Compose file in later tasks.
 
 ## Prerequisites
 
@@ -78,6 +79,36 @@ docker compose exec postgres psql -U ota -d ota -c "INSERT INTO devices (device_
 ```
 
 For the schema design and example dashboard queries, see `../docs/database-schema.md`.
+
+## Orchestrator (skeleton)
+
+The orchestrator connects to the MQTT broker, records heartbeats in the device registry, and marks devices `offline` when their heartbeats stop. It expects a broker named `mosquitto` in this Compose file (added by the MQTT broker task). Until then it logs `Cannot reach broker` and keeps retrying, which is expected.
+
+To test it before the broker task is merged, run it on your machine against a throwaway broker:
+
+```bash
+# 1. Start only the database, plus a test broker that accepts local connections
+docker compose up -d postgres
+printf 'listener 1883\nallow_anonymous true\n' > /tmp/mosquitto.conf
+docker run -d --name test-broker -p 1883:1883 \
+  -v /tmp/mosquitto.conf:/mosquitto/config/mosquitto.conf eclipse-mosquitto:2
+
+# 2. Run the orchestrator locally
+cd orchestrator
+pip install -r requirements.txt
+POSTGRES_PASSWORD=<your password> LOG_LEVEL=DEBUG python main.py
+```
+
+In another terminal, publish a heartbeat (`mosquitto_pub` comes from the `mosquitto-clients` package):
+
+```bash
+mosquitto_pub -h localhost -t ota/devices/device-001/heartbeat -m '{"schema_version":1,"device_id":"device-001","version":"1.0","status":"healthy","error_count":0,"timestamp":"2026-10-29T14:03:07Z"}'
+docker compose exec postgres psql -U ota -d ota -c "SELECT * FROM fleet_overview;"
+```
+
+Expected: the orchestrator logs the heartbeat, and `device-001` appears with its version and a recent heartbeat. Stop publishing and after 30 seconds the orchestrator logs `Device device-001 marked offline` and the status changes to `offline`. Malformed messages are rejected with a warning that names the reason. Remove the test broker afterward with `docker rm -f test-broker`.
+
+Settings are environment variables (see `orchestrator/config.py`): `MQTT_HOST`, `DB_HOST`, `HEARTBEAT_TIMEOUT_SECONDS`, `LOG_LEVEL`, and others.
 
 ## Run the registry unit tests
 

@@ -1,7 +1,7 @@
 # Control plane services for the OTA Fleet Manager.
 # Start with:  cp .env.example .env   (then edit the password)
 #              docker compose up -d --build
-# More services (Mosquitto, orchestrator, Grafana) are added in later tasks.
+# More services (Mosquitto, Grafana) are added in later tasks.
 
 name: ota-fleet-manager
 
@@ -19,27 +19,44 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Runs once, the first time the pgdata volume is created.
-      - ./registries/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 10
 
   software-registry:
-    build: ./registries/software
+    build: ./software-registry
     restart: unless-stopped
     ports:
       - "8080:8080"
     volumes:
       # Read-only: add or change packages by editing this folder, no rebuild needed.
-      - ./registries/software/packages:/packages:ro
+      - ./software-registry/packages:/packages:ro
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 10s
       timeout: 3s
       retries: 5
+
+  orchestrator:
+    build: ./orchestrator
+    restart: unless-stopped
+    environment:
+      # 'mosquitto' is the broker service added by the MQTT broker task. Until it exists,
+      # the orchestrator keeps retrying; run it locally against a test broker instead.
+      MQTT_HOST: ${MQTT_HOST:-mosquitto}
+      DB_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-ota}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-ota}
+      HEARTBEAT_TIMEOUT_SECONDS: ${HEARTBEAT_TIMEOUT_SECONDS:-30}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   pgdata:
