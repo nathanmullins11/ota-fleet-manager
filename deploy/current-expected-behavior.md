@@ -1,6 +1,6 @@
 # Expected Behavior: What You Should See
 
-What to expect after `docker compose up -d --build` (from `deploy/`) in each of three situations. Log wording may differ slightly from what is shown here, but the pattern should match.
+What to expect after `docker compose up -d --build` (from `deploy/`) in each of three situations. Scenario 1 below was confirmed on a real Docker setup. Scenarios 2 and 3 are based on an end-to-end test outside Docker, so log wording may differ slightly, but the pattern should match.
 
 | Scenario | Broker | Device |
 |---|---|---|
@@ -37,12 +37,12 @@ This is the situation today, before the MQTT broker task is merged.
 
 ```
 Starting orchestrator (heartbeat timeout 30s)
-Cannot reach broker at mosquitto:1883 (<name resolution error>); retrying in 3s
-Cannot reach broker at mosquitto:1883 (<name resolution error>); retrying in 3s
+Cannot reach broker at mosquitto:1883 ([Errno -2] Name or service not known); retrying in 3s
+Cannot reach broker at mosquitto:1883 ([Errno -2] Name or service not known); retrying in 3s
 ...
 ```
 
-The warning repeats every 3 seconds. The error text depends on your system, for example `Name or service not known`. There is no `Connected to database` line, because the orchestrator does nothing else until it reaches the broker.
+The warning repeats every 7 to 10 seconds, and the spacing varies: a fixed 3-second wait, plus however long the failed name lookup takes (4 to 7 seconds in testing). (If the broker host exists but refuses connections, the error text is different and the retries come every 3 seconds.) There is no `Connected to database` line, because the orchestrator does nothing else until it reaches the broker.
 
 **Database:** seven tables exist, seeded with 4 rollout groups and one firmware version (`1.0`). `devices` and `heartbeats` are empty.
 
