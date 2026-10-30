@@ -27,13 +27,13 @@ services:
       retries: 10
 
   software-registry:
-    build: ./software-registry
+    build: ./registries/software
     restart: unless-stopped
     ports:
       - "8080:8080"
     volumes:
       # Read-only: add or change packages by editing this folder, no rebuild needed.
-      - ./software-registry/packages:/packages:ro
+      - ./registries/software/packages:/packages:ro
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
