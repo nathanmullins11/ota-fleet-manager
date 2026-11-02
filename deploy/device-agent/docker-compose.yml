@@ -1,0 +1,30 @@
+# Simulated devices. These run on the local computer and connect to the broker over MQTT,
+# separately from the control-plane stack.
+#
+#   cp .env.example .env     (set MQTT_HOST to the broker's address)
+#   docker compose up -d --build
+#
+# To add a device, copy the device-001 block, change the service name and DEVICE_ID
+# (each ID must be unique, and must look like device-NNN).
+
+name: ota-fleet-devices
+
+x-device: &device
+  build: .
+  restart: unless-stopped
+  extra_hosts:
+    # Lets a container reach services published on the host machine (Linux, WSL, Docker Desktop).
+    - "host.docker.internal:host-gateway"
+  environment: &device-env
+    MQTT_HOST: ${MQTT_HOST:-host.docker.internal}
+    MQTT_PORT: ${MQTT_PORT:-1883}
+    FIRMWARE_VERSION: ${FIRMWARE_VERSION:-1.0}
+    HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-5}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+  device-001:
+    <<: *device
+    environment:
+      <<: *device-env
+      DEVICE_ID: device-001
