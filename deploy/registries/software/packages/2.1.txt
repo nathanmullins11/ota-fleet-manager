@@ -1,0 +1,3 @@
+OTA placeholder firmware
+version: 2.1
+behavior: faulty update (will crash or spike errors once real packages exist)
