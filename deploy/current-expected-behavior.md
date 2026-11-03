@@ -1,12 +1,11 @@
 # Expected Behavior: What You Should See
 
-What to expect after `docker compose up -d --build` (from `deploy/`) in each of three situations. Scenario 1 below was confirmed on a real Docker setup. Scenarios 2 and 3 are based on an end-to-end test outside Docker, so log wording may differ slightly, but the pattern should match.
+What to expect after `docker compose up -d --build` (from `deploy/`) with and without a device. Both scenarios are based on an end-to-end test of the same components outside Docker, so details may differ slightly, but the pattern should match.
 
-| Scenario | Broker | Device |
-|---|---|---|
-| [1](#1-no-broker-no-device) | not running | not running |
-| [2](#2-broker-no-device) | running | not running |
-| [3](#3-broker-and-device) | running | running |
+| Scenario | Device |
+|---|---|
+| [1](#1-no-device) | not running |
+| [2](#2-with-a-device) | running |
 
 ## Quick check commands
 
@@ -21,38 +20,18 @@ curl localhost:8080/versions                        # software registry
 
 To see every accepted heartbeat in the logs, set `LOG_LEVEL=DEBUG` in `.env` and restart the orchestrator (`docker compose up -d orchestrator`).
 
-## 1. No broker, no device
-
-This is the situation today, before the MQTT broker task is merged.
+## 1. No device
 
 **`docker compose ps`**
 
 | Service | State |
 |---|---|
+| `mosquitto` | Up (healthy) |
 | `postgres` | Up (healthy) |
 | `software-registry` | Up (healthy) |
 | `orchestrator` | Up (no health label) |
 
-**Orchestrator logs**
-
-```
-Starting orchestrator (heartbeat timeout 30s)
-Cannot reach broker at mosquitto:1883 ([Errno -2] Name or service not known); retrying in 3s
-Cannot reach broker at mosquitto:1883 ([Errno -2] Name or service not known); retrying in 3s
-...
-```
-
-The warning repeats every 7 to 10 seconds, and the spacing varies: a fixed 3-second wait, plus however long the failed name lookup takes (4 to 7 seconds in testing). (If the broker host exists but refuses connections, the error text is different and the retries come every 3 seconds.) There is no `Connected to database` line, because the orchestrator does nothing else until it reaches the broker.
-
-**Database:** seven tables exist, seeded with 4 rollout groups and one firmware version (`1.0`). `devices` and `heartbeats` are empty.
-
-**Software registry:** works independently. `curl localhost:8080/versions` lists 1.0, 2.0, and 2.1.
-
-**Is this a problem?** No. The orchestrator is waiting for a broker that does not exist yet, and it connects by itself once one does.
-
-## 2. Broker, no device
-
-**`docker compose ps`:** the same three services, plus the `mosquitto` service.
+The orchestrator starts only after `mosquitto` and `postgres` are healthy.
 
 **Orchestrator logs**
 
@@ -64,7 +43,9 @@ Connected to database ota at postgres:5432
 
 Then the logs go quiet. The offline check runs every 5 seconds, but it only logs when it marks a device offline, and there are no devices.
 
-**Database:** `devices` and `heartbeats` are still empty. Nothing is publishing, so nothing is recorded.
+**Database:** seven tables exist, seeded with 4 rollout groups and one firmware version (`1.0`). `devices` and `heartbeats` are empty, because nothing is publishing yet.
+
+**Software registry:** `curl localhost:8080/versions` lists 1.0, 2.0, and 2.1.
 
 **If it does not connect to the broker:**
 
@@ -75,7 +56,7 @@ Then the logs go quiet. The offline check runs every 5 seconds, but it only logs
 
 **Optional check without a device:** publish a test heartbeat by hand (the command is in the README, under "Orchestrator"). The device should appear in `fleet_overview`.
 
-## 3. Broker and device
+## 2. With a device
 
 Assumes the device agent publishes valid heartbeats about every 5 seconds.
 
