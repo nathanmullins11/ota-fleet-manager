@@ -1,0 +1,44 @@
+# mqtt-bridge example: a robot's on-board broker <-> a fleet/cloud broker
+bridge_id: robot-042
+
+local:                       # broker on the device / edge
+  host: localhost
+  port: 1883
+  protocol: v5               # v5 (preferred: No Local loop guard) or v311
+
+remote:                      # fleet / cloud broker
+  host: mqtt.example.com
+  port: 8883
+  protocol: v5
+  tls: true
+  ca_certs: /etc/mqtt-bridge/ca.pem
+  certfile: /etc/mqtt-bridge/robot-042.crt   # per-device client cert
+  keyfile: /etc/mqtt-bridge/robot-042.key
+  # username / password also supported
+
+buffer_size: 10000           # per direction, while the far side is unreachable
+dedup_ttl: 5.0               # seconds
+
+rules:
+  # telemetry up: local "telemetry/battery" -> remote "fleet/robot-042/telemetry/battery"
+  - topic: "telemetry/#"
+    direction: out
+    remote_prefix: "fleet/robot-042/"
+    qos: 0
+
+  # events up, at-least-once
+  - topic: "events/#"
+    direction: out
+    remote_prefix: "fleet/robot-042/"
+    qos: 1
+
+  # commands down: remote "fleet/robot-042/cmd/ota" -> local "cmd/ota"
+  - topic: "cmd/#"
+    direction: in
+    remote_prefix: "fleet/robot-042/"
+    qos: 1
+
+  # shared config, kept in sync both ways (same topic name on both brokers)
+  - topic: "config/#"
+    direction: both
+    qos: 1
