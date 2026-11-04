@@ -6,7 +6,7 @@ a bad message must never crash the orchestrator.
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 SUPPORTED_SCHEMA_VERSION = 1
@@ -16,7 +16,13 @@ EVENT_NAMES = {
     "update_started", "update_succeeded", "update_failed",
     "rollback_started", "rollback_succeeded", "rollback_failed",
 }
-VERSION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
+# Always used with fullmatch(): re.match() with "$" would also accept a trailing newline.
+# re.ASCII keeps \d to 0-9 (otherwise it matches digits from any script).
+VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)?", re.ASCII)
+
+# Upper bounds of the database columns these fields are stored in (init.sql).
+INT4_MAX = 2**31 - 1    # INTEGER: devices.error_count, heartbeats.error_count
+INT8_MAX = 2**63 - 1    # BIGINT:  rollouts.id (rollout_id)
 
 
 class InvalidMessage(ValueError):
@@ -49,24 +55,27 @@ def _load(payload: bytes, topic_device_id: str) -> dict:
         raise InvalidMessage("payload is not valid JSON") from None
     if not isinstance(data, dict):
         raise InvalidMessage("payload is not a JSON object")
-    if data.get("schema_version") != SUPPORTED_SCHEMA_VERSION:
-        raise InvalidMessage(f"unsupported schema_version {data.get('schema_version')!r}")
+    schema_version = data.get("schema_version")
+    # Exact type check: 1.0 and true both compare equal to 1 but are not the integer 1.
+    if type(schema_version) is not int or schema_version != SUPPORTED_SCHEMA_VERSION:
+        raise InvalidMessage(f"unsupported schema_version {schema_version!r}")
     if data.get("device_id") != topic_device_id:
         raise InvalidMessage(
             f"device_id {data.get('device_id')!r} does not match topic ({topic_device_id})")
     return data
 
 
-def _int(data: dict, key: str, minimum: int = 0) -> int:
+def _int(data: dict, key: str, minimum: int = 0, maximum: int = INT4_MAX) -> int:
+    """An integer in [minimum, maximum]; the maximum keeps it within its database column."""
     value = data.get(key)
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise InvalidMessage(f"{key} must be an integer >= {minimum}")
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise InvalidMessage(f"{key} must be an integer from {minimum} to {maximum}")
     return value
 
 
 def _version(data: dict, key: str) -> str:
     value = data.get(key)
-    if not isinstance(value, str) or not VERSION_RE.match(value):
+    if not isinstance(value, str) or not VERSION_RE.fullmatch(value):
         raise InvalidMessage(f"{key} must look like '1.0' or '2.1.3'")
     return value
 
@@ -81,6 +90,9 @@ def _timestamp(data: dict) -> datetime:
         raise InvalidMessage("timestamp is not ISO 8601") from None
     if parsed.tzinfo is None:
         raise InvalidMessage("timestamp must include a time zone (use a trailing Z)")
+    # The contract requires UTC. "Z" and "+00:00" are both UTC; "+05:00" is not.
+    if parsed.utcoffset() != timedelta(0):
+        raise InvalidMessage("timestamp must be in UTC (use a trailing Z)")
     return parsed
 
 
@@ -109,7 +121,7 @@ def parse_event(topic_device_id: str, payload: bytes) -> Event:
     return Event(
         device_id=topic_device_id,
         event=name,
-        rollout_id=_int(data, "rollout_id", minimum=1),
+        rollout_id=_int(data, "rollout_id", minimum=1, maximum=INT8_MAX),
         version=_version(data, "version"),
         reason=reason,
         timestamp=_timestamp(data),

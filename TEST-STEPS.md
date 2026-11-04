@@ -13,9 +13,9 @@ Replace with hostname of VM
 Configure VM
 ```
 git clone https://github.com/nathanmullins11/ota-fleet-manager.git
-cd ota-fleet-manager
+cd ota-fleet-manager/deploy
 chmod +x bootstrap.sh
-sudo ./boostrap.sh
+sudo ./bootstrap.sh
 exit
 # re ssh from WSL local
 docker run --rm hello-world
@@ -24,7 +24,7 @@ docker run --rm hello-world
 Build and Start Control Plane
 ```
 cd ota-fleet-manager/deploy
-cp .env.exmaple .env
+cp .env.example .env
 docker compose up -d --build
 docker compose ps
 ```

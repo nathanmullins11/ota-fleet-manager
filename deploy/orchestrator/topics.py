@@ -4,7 +4,8 @@ import re
 HEARTBEAT_SUBSCRIPTION = "ota/devices/+/heartbeat"
 EVENTS_SUBSCRIPTION = "ota/devices/+/events"
 
-DEVICE_ID_RE = re.compile(r"^device-\d{3,}$")
+# Always used with fullmatch() and re.ASCII: no trailing newline, digits 0-9 only.
+DEVICE_ID_RE = re.compile(r"device-\d{3,}", re.ASCII)
 
 
 def command_topic(device_id: str) -> str:
@@ -18,6 +19,6 @@ def parse_device_topic(topic: str):
     if len(parts) != 4 or parts[0] != "ota" or parts[1] != "devices":
         return None
     device_id, kind = parts[2], parts[3]
-    if not DEVICE_ID_RE.match(device_id):
+    if not DEVICE_ID_RE.fullmatch(device_id):
         return None
     return device_id, kind

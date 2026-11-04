@@ -3,8 +3,10 @@ import os
 import re
 from dataclasses import dataclass
 
-DEVICE_ID_RE = re.compile(r"^device-\d{3,}$")
-VERSION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
+# Same rules as the orchestrator (topics.py, messages.py). Always used with fullmatch()
+# and re.ASCII: no trailing newline, digits 0-9 only.
+DEVICE_ID_RE = re.compile(r"device-\d{3,}", re.ASCII)
+VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)?", re.ASCII)
 
 
 @dataclass(frozen=True)
@@ -19,11 +21,11 @@ class Config:
 
 def load_config() -> Config:
     device_id = os.environ.get("DEVICE_ID", "")
-    if not DEVICE_ID_RE.match(device_id):
+    if not DEVICE_ID_RE.fullmatch(device_id):
         raise SystemExit(f"DEVICE_ID must look like 'device-001' (got {device_id!r})")
 
     version = os.environ.get("FIRMWARE_VERSION", "1.0")
-    if not VERSION_RE.match(version):
+    if not VERSION_RE.fullmatch(version):
         raise SystemExit(f"FIRMWARE_VERSION must look like '1.0' (got {version!r})")
 
     try:
