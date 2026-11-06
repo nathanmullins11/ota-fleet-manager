@@ -101,11 +101,12 @@ Check the orchestrator logs for `Rejected heartbeat message ...`. Each warning n
 | Warning contains | Problem |
 |---|---|
 | `timestamp must include a time zone` | Timestamp has no zone. In Python, use `datetime.now(timezone.utc).isoformat()`, not `datetime.utcnow().isoformat()` |
-| `unsupported schema_version` | `schema_version` is missing or is not `1` |
+| `timestamp must be in UTC` | Timestamp has a non-UTC offset such as `+05:00`. Send UTC with a trailing `Z` (`+00:00` is also accepted) |
+| `unsupported schema_version` | `schema_version` is missing or is not the integer `1` (`1.0` and `true` are rejected) |
 | `does not match topic` | `device_id` in the message differs from the one in the topic |
 | `Ignoring message on unexpected topic` | Device ID is not in the form `device-001`, or the topic is misspelled |
 | `status must be one of` | Status is not `healthy`, `degraded`, `unhealthy`, or `updating` |
-| `error_count must be an integer` | `error_count` was sent as text (`"0"`) or a decimal |
+| `error_count must be an integer` | `error_count` was sent as text (`"0"`), a decimal, or is outside 0 to 2147483647 (the database column's range) |
 | `version must look like` | Version is not like `1.0` or `2.1.3` |
 
 If there are no warnings at all, nothing is reaching the orchestrator. Check that the device and orchestrator use the same broker and that the topic is spelled exactly `ota/devices/<id>/heartbeat`.

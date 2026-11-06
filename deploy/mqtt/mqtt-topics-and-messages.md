@@ -39,7 +39,9 @@ The contract between the **orchestrator** (control plane) and the **device agent
 
 - **Format:** JSON, UTF-8, one object per message.
 - **`schema_version`:** integer, currently `1`. Increase it if a message format changes in a breaking way, so a running device and a newer orchestrator can tell.
-- **Timestamps:** ISO 8601 in UTC with a trailing `Z`, for example `2026-10-29T14:03:07Z`.
+- **Timestamps:** ISO 8601 in UTC with a trailing `Z`, for example `2026-10-29T14:03:07Z`. `+00:00` is accepted as UTC; any other offset is rejected.
+- **Integers:** `error_count` must fit the database's INTEGER column (0 to 2147483647). Booleans and decimals such as `1.0` are not integers, including for `schema_version`.
+- **Device IDs:** `device-` followed by three or more ASCII digits `0-9`. Version strings and device IDs must match exactly (no surrounding whitespace or trailing newline).
 - **Version strings:** digits and dots, such as `1.0` or `2.1`. They must match the file names in the software registry.
 - **Unknown fields are ignored** by the receiver, so fields can be added later without breaking anyone.
 - **Bad messages never crash the receiver.** Invalid JSON or a missing required field is logged and dropped.
@@ -223,3 +225,4 @@ The first terminal should print the topic and the message. This is also the easi
 | Date | Change | Agreed with |
 |---|---|---|
 | Iteration 1 | Initial draft | (pending review) |
+| 2026-11-04 | Stricter validation: UTC-only timestamps, integer ranges, exact-match IDs and versions | (pending review) |

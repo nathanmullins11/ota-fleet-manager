@@ -12,18 +12,22 @@ Endpoints:
   GET /packages/{version}   download the package file
 """
 import hashlib
+import logging
 import os
 import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 PACKAGES_DIR = Path(os.environ.get("PACKAGES_DIR", Path(__file__).parent / "packages")).resolve()
 
 # "2.1.tar.gz" -> version "2.1", extension ".tar.gz"; "1.0.txt" -> "1.0", ".txt"
-FILENAME_RE = re.compile(r"^(?P<version>\d+\.\d+(?:\.\d+)?)(?P<ext>\..+)$")
-VERSION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
+# Always used with fullmatch() and re.ASCII: no trailing newline, digits 0-9 only.
+FILENAME_RE = re.compile(r"(?P<version>\d+\.\d+(?:\.\d+)?)(?P<ext>\..+)", re.ASCII)
+VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)?", re.ASCII)
+
+log = logging.getLogger("software-registry")
 
 app = FastAPI(title="OTA Software Registry")
 
@@ -36,16 +40,34 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _scan_all() -> tuple[dict[str, Path], dict[str, list[str]]]:
+    """Scan PACKAGES_DIR once.
+
+    Returns (packages, duplicates): packages maps version -> file for every version
+    backed by exactly one file; duplicates maps version -> file names for every
+    version claimed by more than one file (for example 1.0.txt and 1.0.tar.gz).
+    """
+    by_version: dict[str, list[Path]] = {}
+    if PACKAGES_DIR.is_dir():
+        for path in sorted(PACKAGES_DIR.iterdir()):
+            match = FILENAME_RE.fullmatch(path.name)
+            if path.is_file() and match:
+                by_version.setdefault(match["version"], []).append(path)
+    packages = {v: paths[0] for v, paths in by_version.items() if len(paths) == 1}
+    duplicates = {v: [p.name for p in paths] for v, paths in by_version.items() if len(paths) > 1}
+    return packages, duplicates
+
+
 def _scan() -> dict[str, Path]:
-    """Map version -> file for every valid package in PACKAGES_DIR."""
-    found: dict[str, Path] = {}
-    if not PACKAGES_DIR.is_dir():
-        return found
-    for path in sorted(PACKAGES_DIR.iterdir()):
-        match = FILENAME_RE.match(path.name)
-        if path.is_file() and match:
-            found[match["version"]] = path
-    return found
+    """Map version -> file for every unambiguous package in PACKAGES_DIR.
+
+    A version claimed by more than one file is left out rather than served, because
+    which file a device would receive would depend on sort order. /health reports it.
+    """
+    packages, duplicates = _scan_all()
+    for version, names in duplicates.items():
+        log.warning("Version %s is claimed by several files %s; not serving it", version, names)
+    return packages
 
 
 def _describe(version: str, path: Path) -> dict:
@@ -59,8 +81,16 @@ def _describe(version: str, path: Path) -> dict:
 
 
 @app.get("/health")
-def health() -> dict:
-    return {"status": "ok", "versions_available": len(_scan())}
+def health():
+    packages, duplicates = _scan_all()
+    if duplicates:
+        # 503 makes the compose healthcheck fail, so the problem is visible in `docker compose ps`.
+        return JSONResponse(status_code=503, content={
+            "status": "error",
+            "versions_available": len(packages),
+            "duplicate_versions": duplicates,
+        })
+    return {"status": "ok", "versions_available": len(packages)}
 
 
 @app.get("/versions")
@@ -89,7 +119,7 @@ def download_package(version: str) -> FileResponse:
 
 def _lookup(version: str) -> Path:
     # Validate before touching the filesystem (blocks path traversal like "../x").
-    if not VERSION_RE.match(version):
+    if not VERSION_RE.fullmatch(version):
         raise HTTPException(status_code=400, detail="Invalid version format")
     path = _scan().get(version)
     if path is None:
