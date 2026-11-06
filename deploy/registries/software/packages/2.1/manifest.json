@@ -1,0 +1,9 @@
+{
+  "entrypoint": "main.py",
+  "filename": "firmware.tar.gz",
+  "notes": "faulty: error spike after 10s, crashes after 15s",
+  "schema_version": 1,
+  "sha256": "09931302bde0403017a50d5809466f267204492772554ebc90067fef79e99664",
+  "size_bytes": 966,
+  "version": "2.1"
+}
