@@ -7,6 +7,8 @@ Scripted demos of the OTA Update Fleet Manager in two setups:
 | **Local**: control plane and devices on one computer | `demo/local/demo.sh` | 1 |
 | **Cloud**: control plane on the VM, devices on your computer | `demo/cloud/control-plane.sh` (VM) and `demo/cloud/devices.sh` (computer) | 2, side by side |
 
+There is also a **visual demo**: a live web page with the same guided steps plus free-play buttons, in both setups (`demo/visual/run.sh`, or `demo/visual/run.sh --cloud <vm-ip>`). See [visual/README.md](visual/README.md). This terminal demo is the fallback.
+
 Each step says what is about to happen and which requirement it covers, does it, and shows the result. By default the script waits for **Enter** before each step so you can talk; `--auto` runs straight through (about 2 minutes, most of it the 30-second offline timeout).
 
 ## What it shows

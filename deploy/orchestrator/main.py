@@ -7,6 +7,7 @@ Not yet implemented (later iterations): publishing update/rollback commands,
 staged rollout, health thresholds, automatic rollback.
 """
 import logging
+import logging.handlers
 import signal
 import threading
 import time
@@ -111,6 +112,12 @@ def main() -> None:
     cfg = load_config()
     logging.basicConfig(level=cfg.log_level,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if cfg.log_file:
+        # Optional copy of the log in a file (used by the visual demo's helper).
+        handler = logging.handlers.RotatingFileHandler(cfg.log_file, maxBytes=5_000_000,
+                                                       backupCount=2)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        logging.getLogger().addHandler(handler)
     log.info("Starting orchestrator (heartbeat timeout %ss, command timeout %ss, "
              "devices download from %s)", cfg.heartbeat_timeout_seconds,
              cfg.command_timeout_seconds, cfg.registry_public_url)

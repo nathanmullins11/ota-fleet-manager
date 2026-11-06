@@ -19,6 +19,7 @@ class Config:
     registry_public_url: str         # how devices reach it; goes into command URLs
     command_timeout_seconds: int     # no event from a commanded device for this long -> failed
     log_level: str
+    log_file: str                    # optional: also write the log here (rotated)
 
 
 def load_config() -> Config:
@@ -42,4 +43,5 @@ def load_config() -> Config:
             "REGISTRY_PUBLIC_URL", "http://host.docker.internal:8080").rstrip("/"),
         command_timeout_seconds=int(os.environ.get("COMMAND_TIMEOUT_SECONDS", "120")),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        log_file=os.environ.get("LOG_FILE", ""),
     )

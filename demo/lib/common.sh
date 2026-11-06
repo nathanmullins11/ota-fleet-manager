@@ -121,11 +121,17 @@ require_docker() {
 
 # --------------------------------------------------------------------------- control plane
 
+# COMPOSE_EXTRA: optional second compose file (the visual demo's helper).
+COMPOSE_EXTRA=${COMPOSE_EXTRA:-}
+VISUAL_HELPER_COMPOSE="$REPO_ROOT/demo/visual/helper/compose.yml"
+
 cp_compose() {
+    local files=(-f "$COMPOSE_FILE")
+    [[ -n "$COMPOSE_EXTRA" ]] && files+=(-f "$COMPOSE_EXTRA")
     if [[ -n "$CP_PROJECT" ]]; then
-        docker compose -p "$CP_PROJECT" -f "$COMPOSE_FILE" "$@"
+        docker compose -p "$CP_PROJECT" "${files[@]}" "$@"
     else
-        docker compose -f "$COMPOSE_FILE" "$@"
+        docker compose "${files[@]}" "$@"
     fi
 }
 

@@ -26,6 +26,8 @@ done
 export CP_LOCAL=1 CP_PROJECT=${CP_PROJECT:-}
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 ENV_FILE="$REPO_ROOT/deploy/.env"
+# The visual demo's helper runs next to the control plane (demo/visual/helper/compose.yml).
+export COMPOSE_EXTRA="$VISUAL_HELPER_COMPOSE"
 
 public_ip() {
     curl -s -4 --max-time 3 https://checkip.amazonaws.com 2>/dev/null \
@@ -41,6 +43,13 @@ start_control_plane() {
         sed "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$pw/" "$REPO_ROOT/deploy/.env.example" >"$ENV_FILE"
         chmod 600 "$ENV_FILE"
         ok "Created deploy/.env with a random database password."
+    fi
+
+    # The visual demo's helper: reachable from outside the VM, protected by a password.
+    if ! grep -q "^VISUAL_DEMO_PASSWORD=" "$ENV_FILE"; then
+        printf '\n# Set by demo/cloud/control-plane.sh: visual demo helper (port 8090).\nVISUAL_DEMO_PASSWORD=%s\nVISUAL_HELPER_BIND=0.0.0.0\n' \
+            "$(head -c 12 /dev/urandom | base64 | tr -d '/+=')" >>"$ENV_FILE"
+        ok "Created a visual demo password in deploy/.env"
     fi
 
     # Update commands tell devices where to download firmware, so the orchestrator needs
@@ -86,8 +95,13 @@ start_control_plane() {
     local ip
     ip=$(public_ip)
     echo
-    say "On your computer, from the repository root, run:"
-    printf '\n      %sdemo/cloud/devices.sh %s%s\n\n' "$BOLD" "${ip:-<vm-ip>}" "$RESET"
+    local password
+    password=$(grep "^VISUAL_DEMO_PASSWORD=" "$ENV_FILE" | tail -n 1 | cut -d= -f2-)
+    say "On your computer, from the repository root, run one of:"
+    printf '\n      %sdemo/visual/run.sh --cloud %s%s      visual demo (password: %s%s%s)\n' \
+        "$BOLD" "${ip:-<vm-ip>}" "$RESET" "$BOLD" "$password" "$RESET"
+    printf '      %sdemo/cloud/devices.sh %s%s          terminal demo\n\n' "$BOLD" "${ip:-<vm-ip>}" "$RESET"
+    info "The visual demo needs TCP 8090 open to your IP in the security group."
     info "The live view starts in a moment. Ctrl+C leaves it; the control plane keeps running."
     sleep 4
 }

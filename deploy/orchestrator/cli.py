@@ -174,7 +174,7 @@ def main(argv=None) -> int:
 
     args = parser.parse_args(argv)
     cfg = load_config()
-    db = Database(cfg)
+    db = Database(cfg, application_name="orchestrator-cli")
     try:
         return args.func(cfg, RolloutStore(db), args)
     except RolloutError as exc:

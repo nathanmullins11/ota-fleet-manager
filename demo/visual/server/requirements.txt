@@ -1,0 +1,5 @@
+fastapi==0.115.6
+uvicorn==0.34.0
+paho-mqtt==2.1.0
+docker==7.1.0
+cryptography==50.0.2

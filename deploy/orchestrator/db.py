@@ -42,15 +42,18 @@ MARK_OFFLINE = """
 
 
 class Database:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, application_name: str = "orchestrator"):
         self._cfg = cfg
         self._conn = None
+        # Shown in pg_stat_activity, so other tools can see the orchestrator is connected.
+        self._application_name = application_name
 
     def _connect(self):
         c = self._cfg
         self._conn = psycopg.connect(
             host=c.db_host, port=c.db_port, dbname=c.db_name,
             user=c.db_user, password=c.db_password, connect_timeout=5,
+            application_name=self._application_name,
             # Autocommit: plain reads do not leave a transaction open, and every
             # `with conn.transaction()` block is a real BEGIN ... COMMIT.
             autocommit=True)

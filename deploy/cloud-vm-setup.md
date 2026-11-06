@@ -17,6 +17,7 @@ Add these inbound rules to the security group. Find your IP with `curl -4 ifconf
 | 22 | Your IP | SSH |
 | 1883 | Your IP | Devices connect to the MQTT broker |
 | 8080 | Your IP | Software registry: firmware downloads, and step 6 of the demo (`demo/`) |
+| 8090 | Your IP | Visual demo helper (`demo/visual/`), only while presenting it; password protected |
 
 Do not open port 1883 to `0.0.0.0/0`. The broker has no authentication until Iteration 3, so anyone who can reach it could publish messages. PostgreSQL only listens on the VM itself.
 

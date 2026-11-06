@@ -36,23 +36,16 @@ def show_versions(registry: str) -> None:
     print()
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--registry", required=True)
-    parser.add_argument("--version", default="2.0")
-    args = parser.parse_args()
-    registry, version = args.registry.rstrip("/"), args.version
+def run_cases(registry: str, version: str) -> list[dict]:
+    """Verify a genuine download, then tampered variants of it (in memory).
 
-    show_versions(registry)
-
+    Returns one dict per case: title, expected (True = should be accepted), accepted, reason.
+    Also used by the visual demo.
+    """
     manifest, signature, package = release.load_published(version, None, registry)
     public_key = release.load_public_key(release.PUBLIC_KEY.read_bytes())
     sha = json.loads(manifest)["sha256"]
-    print(f"   {BOLD}Downloaded {version}:{RESET} manifest, signature {DIM}{signature.strip()[:24].decode()}…{RESET}, "
-          f"package ({len(package)} bytes)")
-    print(f"   {DIM}A device checks: signature → version → checksum from the command → package checksum{RESET}\n")
 
-    # Tampered variants, built in memory.
     flipped = bytearray(package)
     flipped[len(flipped) // 2] ^= 0x01
     evil = b"malicious firmware"
@@ -75,19 +68,43 @@ def main() -> int:
          dict(manifest=manifest, signature=signature, package=package,
               expected_version="9.9")),
     ]
-
-    unexpected = 0
+    results = []
     for title, should_pass, kwargs in cases:
         kwargs.setdefault("expected_version", version)
         try:
             release.verify_package(public_key=public_key, **kwargs)
-            result, passed = f"{GREEN}ACCEPTED{RESET}", True
+            accepted, reason = True, ""
         except release.VerificationError as exc:
-            result, passed = f"{RED}REJECTED{RESET}  {DIM}{exc}{RESET}", False
-        mark = "✔" if passed == should_pass else f"{RED}✘ unexpected{RESET}"
-        unexpected += passed != should_pass
-        print(f"   {mark} {title:<62} {result}")
+            accepted, reason = False, str(exc)
+        results.append({"title": title, "expected": should_pass, "accepted": accepted,
+                        "reason": reason})
+    return results
 
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--registry", required=True)
+    parser.add_argument("--version", default="2.0")
+    args = parser.parse_args()
+    registry, version = args.registry.rstrip("/"), args.version
+
+    show_versions(registry)
+    manifest, signature, package = release.load_published(version, None, registry)
+    print(f"   {BOLD}Downloaded {version}:{RESET} manifest, signature "
+          f"{DIM}{signature.strip()[:24].decode()}…{RESET}, package ({len(package)} bytes)")
+    print(f"   {DIM}A device checks: signature → version → checksum from the command → "
+          f"package checksum{RESET}\n")
+
+    unexpected = 0
+    for case in run_cases(registry, version):
+        if case["accepted"]:
+            result = f"{GREEN}ACCEPTED{RESET}"
+        else:
+            result = f"{RED}REJECTED{RESET}  {DIM}{case['reason']}{RESET}"
+        ok = case["accepted"] == case["expected"]
+        unexpected += not ok
+        mark = "✔" if ok else f"{RED}✘ unexpected{RESET}"
+        print(f"   {mark} {case['title']:<62} {result}")
     return 1 if unexpected else 0
 
 

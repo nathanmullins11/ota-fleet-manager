@@ -1,0 +1,54 @@
+# Visual demo only: adds the demo helper next to the control plane. Used as an extra file
+# on top of the control plane's compose file, never on its own:
+#
+#   docker compose -f deploy/docker-compose.yml -f demo/visual/helper/compose.yml up -d
+#
+# demo/visual/run.sh (local) and demo/cloud/control-plane.sh (VM) do this for you.
+# Relative paths here resolve from deploy/, the first file's folder.
+
+services:
+  orchestrator:
+    environment:
+      # A copy of the orchestrator's log, read by the helper to show its decisions.
+      LOG_FILE: /var/log/orchestrator/orchestrator.log
+    volumes:
+      - orchestrator-logs:/var/log/orchestrator
+
+  visual-helper:
+    build:
+      context: ..
+      dockerfile: demo/visual/helper/Dockerfile
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      DB_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-ota}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-ota}
+      MQTT_HOST: mosquitto
+      REGISTRY_URL: http://software-registry:8080
+      VISUAL_DEMO_PASSWORD: ${VISUAL_DEMO_PASSWORD:?Set VISUAL_DEMO_PASSWORD}
+    ports:
+      # Local: this machine only. On the VM, control-plane.sh sets VISUAL_HELPER_BIND=0.0.0.0;
+      # the security group must then allow TCP 8090 from your IP only.
+      - "${VISUAL_HELPER_BIND:-127.0.0.1}:8090:8090"
+    volumes:
+      - orchestrator-logs:/var/log/orchestrator:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      orchestrator:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  orchestrator-logs:

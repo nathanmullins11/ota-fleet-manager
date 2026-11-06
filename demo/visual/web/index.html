@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OTA Fleet Manager · Visual Demo</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo">⟳</span>
+      <div>
+        <h1>OTA Fleet Manager</h1>
+        <div class="sub">Visual demo · <span id="mode">…</span></div>
+      </div>
+    </div>
+    <div id="services" class="services"></div>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <main>
+    <section id="panel-fleet" class="panel fleet" data-focus="fleet">
+      <div class="panel-head">
+        <h2>Fleet</h2>
+        <div class="toolbar">
+          <button data-action="start-fleet" title="Start device-001 to device-003">Start fleet</button>
+          <button data-action="add-device" title="Start one more device">+ Device</button>
+        </div>
+      </div>
+      <div id="devices" class="devices"></div>
+      <div class="legend">
+        <span><i class="dot healthy"></i>healthy</span>
+        <span><i class="dot unhealthy"></i>unhealthy / crash</span>
+        <span><i class="dot offline"></i>offline</span>
+        <span><i class="pulse-demo"></i>heartbeat</span>
+        <span class="muted">Click a device for its last command</span>
+      </div>
+    </section>
+
+    <section id="panel-rollout" class="panel rollout" data-focus="rollout">
+      <div class="panel-head">
+        <h2>Rollout</h2>
+        <div class="toolbar">
+          <select id="rollout-version" title="Version to roll out">
+            <option value="2.0">2.0 (healthy)</option>
+            <option value="2.1">2.1 (faulty)</option>
+          </select>
+          <button data-action="rollout" class="primary">Start rollout</button>
+          <button data-action="rollback" class="danger">Roll back</button>
+        </div>
+      </div>
+      <div id="rollout"></div>
+      <div class="sim-row">
+        <span class="sim-tag">simulated</span>
+        <span class="muted">Device replies (until the agent installs firmware):</span>
+        <button data-action="reply-succeed">All succeed</button>
+        <button data-action="reply-fail">One fails</button>
+      </div>
+    </section>
+
+    <section id="panel-decisions" class="panel decisions" data-focus="decisions">
+      <div class="panel-head"><h2>Orchestrator decisions</h2><span class="muted">every decision with its reason (NF-5)</span></div>
+      <div id="decisions" class="log"></div>
+    </section>
+
+    <section id="panel-firmware" class="panel firmware" data-focus="firmware">
+      <div class="panel-head">
+        <h2>Signed firmware</h2>
+        <div class="toolbar"><button data-action="firmware-check">Verify &amp; tamper test</button></div>
+      </div>
+      <div id="firmware"></div>
+      <div id="firmware-check"></div>
+      <h3>Recent crashes</h3>
+      <div id="crashes"></div>
+    </section>
+  </main>
+
+  <section id="guided" class="guided">
+    <div class="guided-head">
+      <h2>Guided demo</h2>
+      <span class="muted">← → choose a step · Enter runs it</span>
+      <button data-action="reset-steps" class="ghost">Reset steps</button>
+    </div>
+    <div id="step-rail" class="step-rail"></div>
+    <div id="step-detail" class="step-detail"></div>
+  </section>
+
+  <aside id="drawer" class="drawer hidden">
+    <div class="drawer-head"><h2 id="drawer-title"></h2><button id="drawer-close" class="ghost">✕</button></div>
+    <div id="drawer-body"></div>
+  </aside>
+
+  <div id="toasts" class="toasts"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
