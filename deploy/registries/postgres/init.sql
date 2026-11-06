@@ -129,9 +129,10 @@ INSERT INTO rollout_groups (name, stage_order) VALUES
     ('stage_50',  3),
     ('stage_100', 4);
 
--- Placeholder baseline so devices reporting '1.0' in Iteration 1 match a known version.
+-- Placeholder baseline. The orchestrator replaces it at startup with the software
+-- registry's versions and checksums (and adds the others).
 INSERT INTO firmware_versions (version, notes) VALUES
-    ('1.0', 'baseline (placeholder until packages exist in Iteration 2)');
+    ('1.0', 'baseline (replaced from the software registry when the orchestrator starts)');
 
 -- ---------------------------------------------------------------------------
 -- Example: how the orchestrator records a heartbeat (psycopg / SQLAlchemy).

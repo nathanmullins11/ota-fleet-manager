@@ -50,7 +50,10 @@ class Database:
         c = self._cfg
         self._conn = psycopg.connect(
             host=c.db_host, port=c.db_port, dbname=c.db_name,
-            user=c.db_user, password=c.db_password, connect_timeout=5)
+            user=c.db_user, password=c.db_password, connect_timeout=5,
+            # Autocommit: plain reads do not leave a transaction open, and every
+            # `with conn.transaction()` block is a real BEGIN ... COMMIT.
+            autocommit=True)
         log.info("Connected to database %s at %s:%s", c.db_name, c.db_host, c.db_port)
 
     def _run(self, work):
@@ -65,6 +68,10 @@ class Database:
                 self.close()
                 if attempt == 2:
                     raise
+
+    def run(self, work):
+        """Run work(conn) on this object's connection; see _run. Used by rollouts.py."""
+        return self._run(work)
 
     def record_heartbeat(self, hb: Heartbeat) -> None:
         params = {

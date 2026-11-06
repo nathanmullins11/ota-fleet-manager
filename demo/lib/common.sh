@@ -216,6 +216,43 @@ mqtt_pub() {
         mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -q 1 -i "ota-demo-publisher" -t "$1" -m "$2"
 }
 
+# publish_event DEVICE EVENT ROLLOUT_ID VERSION [REASON]: an event as the device would send it.
+publish_event() {
+    local reason=null
+    [[ -n "${5:-}" ]] && reason="\"$5\""
+    mqtt_pub "ota/devices/$1/events" \
+        "{\"schema_version\":1,\"device_id\":\"$1\",\"event\":\"$2\",\"rollout_id\":$3,\"version\":\"$4\",\"reason\":$reason,\"timestamp\":\"$(now_utc)\"}"
+}
+
+# A listener on every device's command topic, so the demo can show the full commands the
+# orchestrator sends (the agent's own log shortens them). Removed with the devices.
+LISTENER=ota-demo-command-listener
+start_command_listener() {
+    docker rm -f "$LISTENER" >/dev/null 2>&1 || true
+    docker run -d --name "$LISTENER" --label "$DEMO_LABEL" "${HOST_GATEWAY[@]}" "$MQTT_IMAGE" \
+        mosquitto_sub -h "$MQTT_HOST" -p "$MQTT_PORT" -q 1 -i ota-demo-listener -v \
+        -t 'ota/devices/+/commands' >/dev/null
+}
+
+# commands_seen KIND [ROLLOUT_ID]: "topic payload" lines for update or rollback commands.
+commands_seen() {
+    docker logs "$LISTENER" 2>/dev/null | grep "\"command\": \"$1\"" \
+        | { if [[ -n "${2:-}" ]]; then grep "\"rollout_id\": $2,"; else cat; fi; } || true
+}
+command_seen() { [[ -n "$(commands_seen "$@")" ]]; }
+
+# Rollout ID of the latest command of a kind, and the devices it went to.
+latest_rollout_id() { commands_seen "$1" | tail -n 1 | grep -o '"rollout_id": [0-9]*' | grep -o '[0-9]*$'; }
+commanded_devices() { commands_seen "$1" "$2" | cut -d' ' -f1 | cut -d/ -f3 | sort -u; }
+
+# Pretty-print one command payload.
+show_command() {
+    sed -e 's/^[^ ]* //' -e 's/^{/{\n  /' -e 's/, "/,\n  "/g' -e 's/}$/\n}/' | indent
+}
+
+# cli ARGS...: the orchestrator's rollout CLI (control plane on this machine only).
+cli() { cp_compose exec -T orchestrator python cli.py "$@"; }
+
 # tools_run ARGS...: python in the tools image, with the repository mounted read-only.
 tools_run() {
     local color=()

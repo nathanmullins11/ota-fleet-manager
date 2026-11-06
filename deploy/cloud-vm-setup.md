@@ -41,7 +41,9 @@ Log out and back in so `ubuntu` can run Docker without `sudo`, then start the st
 
 ```bash
 cd ~/ota-fleet-manager/deploy
-cp .env.example .env      # set a strong POSTGRES_PASSWORD
+cp .env.example .env      # set a strong POSTGRES_PASSWORD, and
+                          # REGISTRY_PUBLIC_URL=http://<VM_PUBLIC_IP>:8080 so update
+                          # commands point devices at the VM
 docker compose up -d --build
 docker compose ps
 ```

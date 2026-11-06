@@ -42,9 +42,9 @@ This is acceptable during development. Once real experiment data exists, back it
 | `heartbeats` | Every report received (history) | Iteration 1 |
 | `firmware_versions` | Metadata for each package in the software registry | Iteration 1 |
 | `rollout_groups` | The stages a device can belong to | Iteration 1 |
-| `rollouts` | One row per release of a version to the fleet | Iteration 2-3 |
-| `rollout_devices` | Each device's outcome within a rollout | Iteration 3 |
-| `rollout_events` | Log of every orchestrator decision with its reason | Iteration 3 |
+| `rollouts` | One row per release of a version to the fleet | Iteration 2 |
+| `rollout_devices` | Each device's outcome within a rollout | Iteration 2 |
+| `rollout_events` | Log of every orchestrator decision with its reason | Iteration 2 |
 | `fleet_overview` (view) | `devices` plus seconds since last heartbeat | Iteration 1 |
 
 ```mermaid
@@ -140,7 +140,9 @@ Four seeded stages: `canary` (1), `stage_10` (2), `stage_50` (3), `stage_100` (4
 
 ### `rollouts`, `rollout_devices`, `rollout_events`
 
-These are used once rollouts are automated.
+Used from Iteration 2 for manual rollouts (`orchestrator/cli.py`); Iteration 3 adds stages and automatic halts.
+
+**Life cycle** (`rollouts.state`): `pending` (created by the CLI) → `in_progress` (commands sent) → `completed` (every device answered). A rollback request sets `halted`; once every device has answered the rollback commands, `rolled_back`. Per device (`rollout_devices.state`): `pending` → `commanded` → `updated` or `failed`; after a rollback request `commanded` → `rolled_back` or `failed`. The rules are in `orchestrator/rollout_logic.py`. When a device reports `update_succeeded`, `devices.previous_version` is set to the rollout's `rollback_version`.
 
 - `rollouts` records the release: the version being rolled out, the `rollback_version` (last known good), the state, the current stage, and a `halt_reason` if it stopped.
 - `rollout_devices` records, per device, whether it was commanded, updated, failed, or rolled back. Counting these gives **percent of fleet exposed** to a bad update.

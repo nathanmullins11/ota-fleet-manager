@@ -137,6 +137,8 @@ Sent once when something notable happens. Unlike heartbeats, events are irregula
 
 **Topic:** `ota/devices/{id}/commands`
 
+Only the orchestrator sends commands, one per device, when a rollout starts (or is rolled back). There is no fleet-wide broadcast topic: every command is tracked per device in `rollout_devices`, and staged rollouts address subsets of the fleet anyway. The device answers with events (4.2) carrying the command's `rollout_id`. A device that sends no event within the orchestrator's command timeout (default 120 s) is recorded as `failed`.
+
 ```json
 {
   "schema_version": 1,

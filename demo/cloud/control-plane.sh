@@ -43,6 +43,20 @@ start_control_plane() {
         ok "Created deploy/.env with a random database password."
     fi
 
+    # Update commands tell devices where to download firmware, so the orchestrator needs
+    # the registry's public address. Set it once if .env does not have it.
+    if ! grep -q "^REGISTRY_PUBLIC_URL=" "$ENV_FILE"; then
+        local addr
+        addr=$(public_ip)
+        if [[ -n "$addr" ]]; then
+            printf '\n# Set by demo/cloud/control-plane.sh: registry address devices use.\nREGISTRY_PUBLIC_URL=http://%s:8080\n' \
+                "$addr" >>"$ENV_FILE"
+            ok "Set REGISTRY_PUBLIC_URL=http://$addr:8080 in deploy/.env"
+        else
+            warn "Could not find the public IP; set REGISTRY_PUBLIC_URL in deploy/.env yourself."
+        fi
+    fi
+
     if [[ "$PULL" == 1 ]]; then
         say "Updating the code ($(git -C "$REPO_ROOT" branch --show-current)):"
         git -C "$REPO_ROOT" pull --ff-only 2>&1 | tail -n 2 | indent \
@@ -79,9 +93,14 @@ start_control_plane() {
 }
 
 render_view() {
-    local ip=$1
-    printf '%s  OTA control plane  %s%s   %s%s  (refreshes every 2 s, Ctrl+C to leave)%s\n\n' \
+    local ip=$1 message=$2
+    printf '%s  OTA control plane  %s%s   %s%s%s\n' \
         "$BOLD$CYAN" "$ip" "$RESET" "$DIM" "$(date -u '+%H:%M:%S UTC')" "$RESET"
+    printf '  %sKeys: %su%s update fleet to 2.0   %sb%s roll back latest rollout   %sq%s leave view%s\n\n' \
+        "$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET"
+    if [[ -n "$message" ]]; then
+        printf '%sLast action%s\n%s\n\n' "$BOLD" "$RESET" "$message" | sed '2,$s/^/   /'
+    fi
 
     printf '%sServices%s\n' "$BOLD" "$RESET"
     cp_compose ps --format "{{.Service}}\t{{.Status}}" 2>/dev/null \
@@ -105,25 +124,90 @@ render_view() {
     if [[ -n "$crashes" ]]; then printf '%s\n' "$crashes" | sed "s/^/   ${RED}/; s/$/${RESET}/"
     else info "none"; fi
 
-    printf '\n%sOrchestrator decisions%s %s(rejected messages, offline devices, connections)%s\n' \
+    render_rollout
+
+    printf '\n%sOrchestrator decisions%s %s(rollouts, rejected messages, offline devices)%s\n' \
         "$BOLD" "$RESET" "$DIM" "$RESET"
     cp_compose logs --no-log-prefix --tail 300 orchestrator 2>/dev/null \
-        | grep -E "Rejected|marked offline|Connected to broker|Starting orchestrator|Event from|Lost connection" \
+        | grep -E "Rejected|marked offline|Connected to broker|Starting orchestrator|Rollout|Lost connection" \
         | tail -n 10 \
         | sed -e "s/^[0-9-]* \([0-9:]*\),[0-9]* /\1 /" \
               -e "s/\(.*Rejected.*\)/${YELLOW}\1${RESET}/" \
               -e "s/\(.*marked offline.*\)/${RED}\1${RESET}/" | indent
 }
 
+# The latest rollout: state, versions, each device's state, and its last decisions.
+render_rollout() {
+    local rollout
+    rollout=$(cp_psql -Atc "SELECT id || '  ' || upper(state) || '  ' || target_version
+                                   || ' (rollback version ' || rollback_version || ')'
+                              FROM rollouts ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+    printf '\n%sCurrent rollout%s\n' "$BOLD" "$RESET"
+    if [[ -z "$rollout" ]]; then
+        info "none yet (press u to start one)"
+        return
+    fi
+    local rid=${rollout%% *}
+    printf '   %s\n' "$rollout" | sed -e "s/ COMPLETED / ${GREEN}COMPLETED${RESET} /" \
+        -e "s/ ROLLED_BACK / ${YELLOW}ROLLED_BACK${RESET} /" -e "s/ HALTED / ${RED}HALTED${RESET} /"
+    cp_psql -Atc "SELECT string_agg(device_id || ' ' || state, '   ' ORDER BY device_id)
+                    FROM rollout_devices WHERE rollout_id = $rid;" 2>/dev/null \
+        | sed -e "s/ updated/ ${GREEN}updated${RESET}/g" -e "s/ failed/ ${RED}failed${RESET}/g" \
+              -e "s/ rolled_back/ ${YELLOW}rolled_back${RESET}/g" | indent
+    cp_psql -Atc "SELECT to_char(created_at, 'HH24:MI:SS') || '  ' || event || ': ' || coalesce(reason, '')
+                    FROM (SELECT * FROM rollout_events WHERE rollout_id = $rid
+                          ORDER BY id DESC LIMIT 3) e ORDER BY created_at;" 2>/dev/null \
+        | cut -c1-110 | sed "s/^/      ${DIM}/; s/$/${RESET}/"
+}
+
+# Keys in the live view run the rollout CLI in the orchestrator container.
+run_key_action() {
+    case "$1" in
+        u)
+            printf '$ cli.py rollout start 2.0 --all\n'
+            cp_compose exec -T orchestrator python cli.py rollout start 2.0 --all 2>&1 \
+                | grep -v -E "^$|Follow it|cli.py rollout status"
+            ;;
+        b)
+            local rid
+            rid=$(cp_psql -Atc "SELECT id FROM rollouts ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+            if [[ -z "$rid" ]]; then
+                echo "There is no rollout to roll back."
+                return
+            fi
+            printf '$ cli.py rollout rollback %s\n' "$rid"
+            cp_compose exec -T orchestrator python cli.py rollout rollback "$rid" \
+                --reason "operator: rollback requested from the live view" 2>&1 | head -n 1
+            ;;
+    esac
+}
+
+leave_view() {
+    tput cnorm 2>/dev/null
+    echo
+    info "Live view closed; the control plane is still running."
+    exit 0
+}
+
 live_view() {
-    local ip frame
+    local ip frame key message="" have_tty=0
     ip=$(public_ip)
-    trap 'tput cnorm 2>/dev/null; echo; info "Live view closed; the control plane is still running."; exit 0' INT
+    { : </dev/tty; } 2>/dev/null && have_tty=1
+    trap leave_view INT
     tput civis 2>/dev/null
     while true; do
-        frame=$(render_view "$ip")      # render first, then redraw at once: no flicker
+        frame=$(render_view "$ip" "$message")   # render first, then redraw at once: no flicker
         printf '\033[H\033[2J%s\n' "$frame"
-        sleep 2
+        key=""
+        if [[ "$have_tty" == 1 ]]; then
+            read -r -s -n 1 -t 2 key </dev/tty || true
+        else
+            sleep 2
+        fi
+        case "$key" in
+            u|b) message=$(run_key_action "$key") ;;
+            q) leave_view ;;
+        esac
     done
 }
 

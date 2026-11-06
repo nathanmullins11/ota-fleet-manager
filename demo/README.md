@@ -19,8 +19,9 @@ Each step says what is about to happen and which requirement it covers, does it,
 | 4 | A heartbeat reporting a firmware crash is stored with `crash_count` separately from errors | FR-4 groundwork, FR-8 |
 | 5 | A stopped device is marked offline after the 30 s timeout, then back online on its next heartbeat | Timeout requirement, NF-1 |
 | 6 | The registry's signed firmware: a genuine package verifies; a flipped bit, a forged manifest, a different signing key, and a replayed version are all rejected | FR-6, FR-3 checks |
+| 7 | A manual rollout of 2.0: the orchestrator sends each device its own command (shown in full), follows the replies (one device fails), then rolls the rollout back to 1.0. Every decision is recorded with its reason | Iteration 2 orchestrator commands, NF-5 |
 
-Step 4 publishes the heartbeat a device running faulty 2.1 will send, because the agent does not run firmware yet. Step 6 runs the device's verification checks (`verify_package()` in `tools/release.py`) on a real download from the registry; tampering happens in memory only.
+Step 4 publishes the heartbeat a device running faulty 2.1 will send, because the agent does not run firmware yet. In step 7 the commands are real (the device containers receive them), but the devices' replies are simulated by the script, because the agent does not install firmware yet; the step says so on screen, and the replies get removed once it does. Step 6 runs the device's verification checks (`verify_package()` in `tools/release.py`) on a real download from the registry; tampering happens in memory only.
 
 ## Requirements
 
@@ -63,9 +64,12 @@ It updates the code, starts the control plane, applies database migrations, prin
 - **Services**: health of each container
 - **Fleet**: the device registry (`fleet_overview`)
 - **Recent crashes**: heartbeats with `crash_count > 0`
-- **Orchestrator decisions**: rejected messages, offline devices, broker connections
+- **Current rollout**: the latest rollout's state, each device's state, and its last decisions
+- **Orchestrator decisions**: rollout commands and replies, rejected messages, offline devices
 
-Ctrl+C closes the live view; the control plane keeps running. `--view` reopens just the view; `--no-pull` skips `git pull`.
+Keys in the live view: **u** starts a rollout of 2.0 to every online device, **b** rolls back the latest rollout, **q** closes the view. In step 7, `devices.sh` tells you when to press them. The same actions are available as `docker compose exec orchestrator python cli.py ...` (see `deploy/README.md`).
+
+Ctrl+C (or q) closes the live view; the control plane keeps running. `--view` reopens just the view; `--no-pull` skips `git pull`.
 
 **Terminal 2, on your computer**, from the repository root:
 
@@ -84,6 +88,7 @@ It checks ports 1883 and 8080 on the VM, starts the devices, and walks through t
 | `Devices from deploy/device-agent are already running` | `(cd deploy/device-agent && docker compose down)`; two devices with the same ID keep disconnecting each other |
 | `MQTT broker <ip>:1883 is not reachable` | Is `control-plane.sh` running? Does the security group allow 1883 from your current IP (`curl -4 ifconfig.me`)? Some campus and work networks block 1883 |
 | Step 6 skipped | Open TCP 8080 to your IP in the security group |
+| Step 7 waits for update commands after you press u | Look at the Last action panel: a rollout from an earlier run may still be active (`cli.py rollout list`). Roll it back with b, or start clean with `--reset` |
 | `git pull failed` on the VM | Local changes or a branch without an upstream: fix it, or run with `--no-pull` |
 | Leftover demo containers after a crash | `docker rm -f $(docker ps -aq --filter label=ota-demo=device)` and `docker compose -p ota-demo -f deploy/docker-compose.yml down -v` |
 

@@ -58,3 +58,13 @@ def registry():
 @pytest.fixture(scope="session")
 def release():
     return load_service_module("tools", "release")
+
+
+@pytest.fixture(scope="session")
+def rollout_logic():
+    return load_service_module("orch", "rollout_logic")
+
+
+@pytest.fixture(scope="session")
+def orch_registry():
+    return load_service_module("orch", "registry")

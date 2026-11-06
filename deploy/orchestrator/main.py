@@ -16,12 +16,14 @@ import paho.mqtt.client as mqtt
 from config import load_config
 from db import Database
 from messages import InvalidMessage, parse_event, parse_heartbeat
+from registry import RegistryError, fetch_versions
+from rollouts import RolloutRunner, RolloutStore
 from topics import EVENTS_SUBSCRIPTION, HEARTBEAT_SUBSCRIPTION, parse_device_topic
 
 log = logging.getLogger("orchestrator")
 
 
-def build_client(cfg, mqtt_db: Database) -> mqtt.Client:
+def build_client(cfg, mqtt_db: Database, on_event) -> mqtt.Client:
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=cfg.mqtt_client_id)
     client.reconnect_delay_set(min_delay=1, max_delay=30)
 
@@ -43,7 +45,7 @@ def build_client(cfg, mqtt_db: Database) -> mqtt.Client:
     def on_message(client, userdata, msg):
         # Never let one bad message stop the listener.
         try:
-            handle_message(msg, mqtt_db)
+            handle_message(msg, mqtt_db, on_event)
         except Exception:
             log.exception("Unexpected error handling message on %s", msg.topic)
 
@@ -53,7 +55,7 @@ def build_client(cfg, mqtt_db: Database) -> mqtt.Client:
     return client
 
 
-def handle_message(msg, db: Database) -> None:
+def handle_message(msg, db: Database, on_event=None) -> None:
     parsed = parse_device_topic(msg.topic)
     if parsed is None:
         log.warning("Ignoring message on unexpected topic %s", msg.topic)
@@ -67,13 +69,30 @@ def handle_message(msg, db: Database) -> None:
                       hb.device_id, hb.version, hb.status, hb.error_count, hb.crash_count)
         elif kind == "events":
             ev = parse_event(device_id, msg.payload)
-            # Recording events in rollout_devices arrives with rollouts (Iteration 2).
             log.info("Event from %s: %s rollout=%d version=%s reason=%s",
                      ev.device_id, ev.event, ev.rollout_id, ev.version, ev.reason)
+            if on_event is not None:
+                on_event(ev)
         else:
             log.warning("Ignoring unknown topic kind %r from %s", kind, device_id)
     except InvalidMessage as exc:
         log.warning("Rejected %s message from %s: %s", kind, device_id, exc)
+
+
+def sync_firmware(cfg, store: RolloutStore) -> bool:
+    """Copy the registry's versions and checksums into firmware_versions."""
+    try:
+        versions = fetch_versions(cfg.registry_url)
+        store.sync_firmware(versions)
+    except RegistryError as exc:
+        log.warning("Firmware sync failed, retrying in 10s: %s", exc)
+        return False
+    except Exception:
+        log.exception("Firmware sync failed, retrying in 10s")
+        return False
+    log.info("Firmware synced from registry: %s",
+             ", ".join(v.version for v in versions) or "(none)")
+    return True
 
 
 def connect_with_retry(client, cfg, stop: threading.Event) -> bool:
@@ -92,7 +111,9 @@ def main() -> None:
     cfg = load_config()
     logging.basicConfig(level=cfg.log_level,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    log.info("Starting orchestrator (heartbeat timeout %ss)", cfg.heartbeat_timeout_seconds)
+    log.info("Starting orchestrator (heartbeat timeout %ss, command timeout %ss, "
+             "devices download from %s)", cfg.heartbeat_timeout_seconds,
+             cfg.command_timeout_seconds, cfg.registry_public_url)
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -101,13 +122,28 @@ def main() -> None:
     mqtt_db = Database(cfg)    # used only by paho's callback thread
     main_db = Database(cfg)    # used only by this thread
 
-    client = build_client(cfg, mqtt_db)
+    # One runner per thread, because each Database (connection) belongs to one thread.
+    event_runner = None
+    client = build_client(cfg, mqtt_db, lambda ev: event_runner.on_event(ev))
+    event_runner = RolloutRunner(RolloutStore(mqtt_db), client, cfg.registry_public_url,
+                                 cfg.command_timeout_seconds)
+    store = RolloutStore(main_db)
+    runner = RolloutRunner(store, client, cfg.registry_public_url, cfg.command_timeout_seconds)
+
     if not connect_with_retry(client, cfg, stop):
         return
     client.loop_start()
 
-    next_check = time.monotonic()
+    firmware_synced = False
+    next_sync = next_check = time.monotonic()
     while not stop.is_set():
+        if not firmware_synced and time.monotonic() >= next_sync:
+            firmware_synced = sync_firmware(cfg, store)
+            next_sync = time.monotonic() + 10
+        try:
+            runner.tick()
+        except Exception:
+            log.exception("Rollout processing failed")
         if time.monotonic() >= next_check:
             try:
                 for device_id in main_db.mark_stale_offline(cfg.heartbeat_timeout_seconds):

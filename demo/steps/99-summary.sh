@@ -9,9 +9,10 @@ printf '   %-50s %s\n' \
     "Malformed messages rejected and logged" "contract, NF-5" \
     "Crashes recorded apart from errors" "FR-4 groundwork" \
     "Offline after 30 s silence, back online" "timeout req., NF-1" \
-    "Signed firmware; tampering rejected" "FR-6, FR-3 checks"
+    "Signed firmware; tampering rejected" "FR-6, FR-3 checks" \
+    "Manual rollout + rollback, per-device commands" "It. 2 commands, NF-5"
 echo
-info "Next: devices install updates and roll back on command (Iteration 2),"
+info "Next: devices install the update and reply themselves (Iteration 2),"
 info "then staged rollout with automatic rollback (Iteration 3)."
 
 if [[ "$CP_LOCAL" == 1 ]]; then
