@@ -40,7 +40,7 @@ The contract between the **orchestrator** (control plane) and the **device agent
 - **Format:** JSON, UTF-8, one object per message.
 - **`schema_version`:** integer, currently `1`. Increase it if a message format changes in a breaking way, so a running device and a newer orchestrator can tell.
 - **Timestamps:** ISO 8601 in UTC with a trailing `Z`, for example `2026-10-29T14:03:07Z`. `+00:00` is accepted as UTC; any other offset is rejected.
-- **Integers:** `error_count` must fit the database's INTEGER column (0 to 2147483647). Booleans and decimals such as `1.0` are not integers, including for `schema_version`.
+- **Integers:** `error_count` and `crash_count` must fit the database's INTEGER column (0 to 2147483647). Booleans and decimals such as `1.0` are not integers, including for `schema_version`.
 - **Device IDs:** `device-` followed by three or more ASCII digits `0-9`. Version strings and device IDs must match exactly (no surrounding whitespace or trailing newline).
 - **Version strings:** digits and dots, such as `1.0` or `2.1`. They must match the file names in the software registry.
 - **Unknown fields are ignored** by the receiver, so fields can be added later without breaking anyone.
@@ -61,6 +61,7 @@ Sent on a fixed interval (suggested: every 5 seconds, configurable on the agent)
   "version": "1.0",
   "status": "healthy",
   "error_count": 0,
+  "crash_count": 0,
   "timestamp": "2026-10-29T14:03:07Z"
 }
 ```
@@ -72,7 +73,12 @@ Sent on a fixed interval (suggested: every 5 seconds, configurable on the agent)
 | `version` | string | yes | Firmware version the device is running now |
 | `status` | string | yes | `healthy`, `degraded`, `unhealthy`, or `updating` |
 | `error_count` | integer | yes | Errors since the previous heartbeat (not a running total) |
+| `crash_count` | integer | no (default `0`) | Firmware crashes since the previous heartbeat (not a running total) |
 | `timestamp` | string | yes | Device clock when the message was created |
+
+**What counts as a crash:** the firmware process exiting when the agent did not ask it to, or with a non-zero exit code (see `firmware/README.md`). Stopping the firmware on purpose for an update or rollback is not a crash. While crashed firmware is waiting to be restarted, the agent reports `status` `unhealthy`. Crashes are counted apart from errors so the orchestrator can apply separate thresholds to each (FR-4) and log which one was breached (NF-5). Because the container stays up when the firmware crashes, heartbeats keep arriving; a device whose heartbeats stop is offline, not crashed.
+
+`crash_count` is optional so agents that do not send it yet stay valid; it is treated as `0` when absent. `null` is rejected.
 
 **Status values the device may send:** `healthy`, `degraded`, `unhealthy`, `updating`. The values `offline` and `unknown` in the database are set by the orchestrator (for example when heartbeats stop). A device never sends them.
 
@@ -84,6 +90,7 @@ Sent on a fixed interval (suggested: every 5 seconds, configurable on the agent)
 | `version` | `devices.current_version`, `heartbeats.reported_version` |
 | `status` | `devices.status`, `heartbeats.status` |
 | `error_count` | `devices.error_count`, `heartbeats.error_count` |
+| `crash_count` | `devices.crash_count`, `heartbeats.crash_count` |
 | `timestamp` | `heartbeats.reported_at` |
 | (time of arrival) | `devices.last_heartbeat`, `heartbeats.received_at` |
 
@@ -137,6 +144,8 @@ Sent once when something notable happens. Unlike heartbeats, events are irregula
   "rollout_id": 7,
   "target_version": "2.0",
   "download_url": "http://203.0.113.10:8080/packages/2.0",
+  "manifest_url": "http://203.0.113.10:8080/packages/2.0/manifest",
+  "signature_url": "http://203.0.113.10:8080/packages/2.0/manifest.sig",
   "sha256": "9f2b4c...full 64-character hash...e1",
   "issued_at": "2026-10-29T14:05:30Z"
 }
@@ -149,12 +158,23 @@ Sent once when something notable happens. Unlike heartbeats, events are irregula
 | `rollout_id` | integer | yes | Identifies the rollout. The device copies it into its events |
 | `target_version` | string | yes | Version to install |
 | `download_url` | string | yes | **Absolute** URL of the package in the software registry |
+| `manifest_url` | string | yes | **Absolute** URL of the package's signed manifest |
+| `signature_url` | string | yes | **Absolute** URL of the signature over the manifest |
 | `sha256` | string | yes | Expected checksum, taken from the orchestrator's own records |
 | `issued_at` | string | yes | When the orchestrator sent it |
 
-The registry's `/versions` endpoint returns relative URLs (`/packages/2.0`). The orchestrator combines them with the registry's address (a configuration setting) to produce the absolute URL the device needs.
+The registry's `/versions` endpoint returns relative URLs (`/packages/2.0`, `/packages/2.0/manifest`, `/packages/2.0/manifest.sig`). The orchestrator combines them with the registry's address (a configuration setting) to produce the absolute URL the device needs.
 
 **The agent verifies the download against `sha256` from this command**, not against the header the file server sends. That way the checksum and the file travel by different paths.
+
+**Verification order (FR-3).** Before installing, the agent checks, in this order, and stops at the first failure with an `update_failed` event whose `reason` is the failed check:
+
+1. The signature (`signature_url`) over the exact bytes of the manifest (`manifest_url`) is valid for the release public key built into the device image. Reason: `signature verification failed`.
+2. The manifest's `version` equals `target_version`. Reason: `manifest is for version ...`.
+3. The manifest's `sha256` equals the command's `sha256`. Reason: `checksum in manifest does not match the command`.
+4. The downloaded package's size and SHA-256 equal the manifest's `size_bytes` and `sha256`. Reason: `package size does not match manifest` or `checksum mismatch`.
+
+`verify_package()` in `tools/release.py` is the reference implementation of these checks. The package and manifest formats are described in `firmware/README.md`.
 
 ### 4.4 Command: rollback (orchestrator to device)
 
@@ -167,6 +187,8 @@ The registry's `/versions` endpoint returns relative URLs (`/packages/2.0`). The
   "rollout_id": 7,
   "target_version": "1.0",
   "download_url": "http://203.0.113.10:8080/packages/1.0",
+  "manifest_url": "http://203.0.113.10:8080/packages/1.0/manifest",
+  "signature_url": "http://203.0.113.10:8080/packages/1.0/manifest.sig",
   "sha256": "c41a7d...full 64-character hash...0b",
   "issued_at": "2026-10-29T14:05:52Z"
 }

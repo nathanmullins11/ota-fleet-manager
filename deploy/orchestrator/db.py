@@ -13,19 +13,23 @@ from messages import Heartbeat
 log = logging.getLogger("orchestrator.db")
 
 UPSERT_DEVICE = """
-    INSERT INTO devices (device_id, current_version, status, error_count, last_heartbeat)
-    VALUES (%(device_id)s, %(version)s, %(status)s, %(error_count)s, now())
+    INSERT INTO devices (device_id, current_version, status, error_count, crash_count,
+                         last_heartbeat)
+    VALUES (%(device_id)s, %(version)s, %(status)s, %(error_count)s, %(crash_count)s, now())
     ON CONFLICT (device_id) DO UPDATE
       SET current_version = EXCLUDED.current_version,
           status          = EXCLUDED.status,
           error_count     = EXCLUDED.error_count,
+          crash_count     = EXCLUDED.crash_count,
           last_heartbeat  = EXCLUDED.last_heartbeat,
           updated_at      = now()
 """
 
 INSERT_HEARTBEAT = """
-    INSERT INTO heartbeats (device_id, reported_version, status, error_count, reported_at)
-    VALUES (%(device_id)s, %(version)s, %(status)s, %(error_count)s, %(timestamp)s)
+    INSERT INTO heartbeats (device_id, reported_version, status, error_count, crash_count,
+                            reported_at)
+    VALUES (%(device_id)s, %(version)s, %(status)s, %(error_count)s, %(crash_count)s,
+            %(timestamp)s)
 """
 
 MARK_OFFLINE = """
@@ -65,7 +69,8 @@ class Database:
     def record_heartbeat(self, hb: Heartbeat) -> None:
         params = {
             "device_id": hb.device_id, "version": hb.version, "status": hb.status,
-            "error_count": hb.error_count, "timestamp": hb.timestamp,
+            "error_count": hb.error_count, "crash_count": hb.crash_count,
+            "timestamp": hb.timestamp,
         }
 
         def work(conn):

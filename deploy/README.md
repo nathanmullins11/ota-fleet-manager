@@ -41,14 +41,22 @@ Expected: the orchestrator logged `Connected to broker mosquitto:1883`. The seco
 curl localhost:8080/health
 curl localhost:8080/versions
 curl localhost:8080/versions/2.1
-curl -O localhost:8080/packages/2.0        # downloads the package
+curl -o firmware-2.0.tar.gz localhost:8080/packages/2.0   # downloads the package
+curl localhost:8080/packages/2.0/manifest                  # the signed manifest
+curl localhost:8080/packages/2.0/manifest.sig              # the signature over it
 ```
 
-Expected: `/versions` lists `1.0`, `2.0`, and `2.1` with a SHA-256 checksum each. A download includes an `X-Checksum-SHA256` header (add `-i` to `curl` to see it).
+Expected: `/versions` lists `1.0`, `2.0`, and `2.1`, each with a SHA-256 checksum, notes, and its download, manifest and signature URLs. A download includes an `X-Checksum-SHA256` header (add `-i` to `curl` to see it).
+
+To check the published packages exactly as a device will (signature, version, checksum), run this from the repository root on any machine with `pip install -r tools/requirements.txt`:
+
+```bash
+python tools/release.py verify 1.0 2.0 2.1 --registry http://localhost:8080
+```
 
 You can also open `http://localhost:8080/docs` in a browser for an interactive list of the endpoints.
 
-To add a version, drop a file named `<version>.<ext>` (for example `3.0.txt` or `3.0.tar.gz`) into `registries/software/packages/`. No restart or rebuild is needed.
+Each version is a folder in `registries/software/packages/` holding `firmware.tar.gz`, `manifest.json` and `manifest.sig`. The registry serves only complete folders; `/health` returns 503 and names any folder that is missing a file or has a manifest for a different version. Versions are built and signed with `tools/release.py` (see `firmware/README.md`). No restart or rebuild is needed after adding one.
 
 ## Test the device registry
 

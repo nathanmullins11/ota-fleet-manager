@@ -38,6 +38,7 @@ CREATE TABLE devices (
     status            TEXT NOT NULL DEFAULT 'unknown'
         CHECK (status IN ('unknown', 'healthy', 'degraded', 'unhealthy', 'updating', 'offline')),
     error_count       INTEGER NOT NULL DEFAULT 0,    -- errors since last report/restart
+    crash_count       INTEGER NOT NULL DEFAULT 0,    -- firmware crashes since last report
     rollout_group     TEXT REFERENCES rollout_groups(name),
     last_heartbeat    TIMESTAMPTZ,
     registered_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -57,6 +58,7 @@ CREATE TABLE heartbeats (
     reported_version TEXT,
     status           TEXT,
     error_count      INTEGER,
+    crash_count      INTEGER NOT NULL DEFAULT 0,
     reported_at      TIMESTAMPTZ,                    -- timestamp from the device
     received_at      TIMESTAMPTZ NOT NULL DEFAULT now()  -- timestamp at the orchestrator
 );
@@ -112,6 +114,7 @@ SELECT device_id,
        current_version,
        status,
        error_count,
+       crash_count,
        rollout_group,
        last_heartbeat,
        EXTRACT(EPOCH FROM (now() - last_heartbeat))::INTEGER AS seconds_since_heartbeat
@@ -134,15 +137,16 @@ INSERT INTO firmware_versions (version, notes) VALUES
 -- Example: how the orchestrator records a heartbeat (psycopg / SQLAlchemy).
 -- Upsert the device's current state, then append to history:
 --
---   INSERT INTO devices (device_id, current_version, status, error_count, last_heartbeat)
---   VALUES (%(id)s, %(version)s, %(status)s, %(errors)s, now())
+--   INSERT INTO devices (device_id, current_version, status, error_count, crash_count, last_heartbeat)
+--   VALUES (%(id)s, %(version)s, %(status)s, %(errors)s, %(crashes)s, now())
 --   ON CONFLICT (device_id) DO UPDATE
 --     SET current_version = EXCLUDED.current_version,
 --         status          = EXCLUDED.status,
 --         error_count     = EXCLUDED.error_count,
+--         crash_count     = EXCLUDED.crash_count,
 --         last_heartbeat  = EXCLUDED.last_heartbeat,
 --         updated_at      = now();
 --
---   INSERT INTO heartbeats (device_id, reported_version, status, error_count, reported_at)
---   VALUES (%(id)s, %(version)s, %(status)s, %(errors)s, %(device_ts)s);
+--   INSERT INTO heartbeats (device_id, reported_version, status, error_count, crash_count, reported_at)
+--   VALUES (%(id)s, %(version)s, %(status)s, %(errors)s, %(crashes)s, %(device_ts)s);
 -- ---------------------------------------------------------------------------

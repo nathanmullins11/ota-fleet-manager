@@ -11,12 +11,14 @@ from pathlib import Path
 
 import pytest
 
-DEPLOY = Path(__file__).resolve().parent.parent / "deploy"
+REPO = Path(__file__).resolve().parent.parent
+DEPLOY = REPO / "deploy"
 
 SERVICES = {
     "orch": DEPLOY / "orchestrator",
     "agent": DEPLOY / "device-agent",
     "registry": DEPLOY / "registries" / "software",
+    "tools": REPO / "tools",
 }
 
 
@@ -51,3 +53,8 @@ def agent_config():
 @pytest.fixture(scope="session")
 def registry():
     return load_service_module("registry", "app")
+
+
+@pytest.fixture(scope="session")
+def release():
+    return load_service_module("tools", "release")

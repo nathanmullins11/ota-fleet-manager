@@ -63,8 +63,8 @@ def handle_message(msg, db: Database) -> None:
         if kind == "heartbeat":
             hb = parse_heartbeat(device_id, msg.payload)
             db.record_heartbeat(hb)
-            log.debug("Heartbeat %s version=%s status=%s errors=%d",
-                      hb.device_id, hb.version, hb.status, hb.error_count)
+            log.debug("Heartbeat %s version=%s status=%s errors=%d crashes=%d",
+                      hb.device_id, hb.version, hb.status, hb.error_count, hb.crash_count)
         elif kind == "events":
             ev = parse_event(device_id, msg.payload)
             # Recording events in rollout_devices arrives with rollouts (Iteration 2).

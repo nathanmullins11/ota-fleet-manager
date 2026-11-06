@@ -107,6 +107,7 @@ Check the orchestrator logs for `Rejected heartbeat message ...`. Each warning n
 | `Ignoring message on unexpected topic` | Device ID is not in the form `device-001`, or the topic is misspelled |
 | `status must be one of` | Status is not `healthy`, `degraded`, `unhealthy`, or `updating` |
 | `error_count must be an integer` | `error_count` was sent as text (`"0"`), a decimal, or is outside 0 to 2147483647 (the database column's range) |
+| `crash_count must be an integer` | Same as above for `crash_count`, or it was sent as `null` (leave the field out instead) |
 | `version must look like` | Version is not like `1.0` or `2.1.3` |
 
 If there are no warnings at all, nothing is reaching the orchestrator. Check that the device and orchestrator use the same broker and that the topic is spelled exactly `ota/devices/<id>/heartbeat`.
