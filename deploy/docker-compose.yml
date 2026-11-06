@@ -5,10 +5,18 @@
 
 name: ota-fleet-manager
 
+# Caps each service at 30 MB of logs so they cannot fill the cloud VM's disk.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   mosquitto:
     image: eclipse-mosquitto:2
     restart: unless-stopped
+    logging: *logging
     ports:
       # Open to other hosts because devices connect from outside the VM.
       - "1883:1883"
@@ -24,6 +32,7 @@ services:
   postgres:
     image: postgres:16
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ota}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
@@ -44,6 +53,7 @@ services:
   software-registry:
     build: ./registries/software
     restart: unless-stopped
+    logging: *logging
     ports:
       - "8080:8080"
     volumes:
@@ -59,6 +69,7 @@ services:
   orchestrator:
     build: ./orchestrator
     restart: unless-stopped
+    logging: *logging
     environment:
       MQTT_HOST: mosquitto
       DB_HOST: postgres
