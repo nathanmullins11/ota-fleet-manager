@@ -24,9 +24,9 @@ if [[ "$CP_LOCAL" == 1 ]]; then
     orchestrator_log "$since" "Rejected" | sed 's/^[0-9-]* [0-9:,]* //' | indent
     count=$(orchestrator_log "$since" "Rejected" | wc -l)
     if ((count >= 3)); then
-        ok "All $count rejected with a reason; device-002's registry entry is untouched."
+        check_pass "All $count rejected with a reason; device-002's registry entry is untouched."
     else
-        bad "Expected 3 rejections, saw $count."
+        check_fail "Expected 3 rejections, saw $count."
     fi
 else
     look_at_vm "three 'Rejected heartbeat message from device-002: ...' lines in the orchestrator log."

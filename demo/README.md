@@ -7,7 +7,9 @@ Scripted demos of the OTA Update Fleet Manager in two setups:
 | **Local**: control plane and devices on one computer | `demo/local/demo.sh` | 1 |
 | **Cloud**: control plane on the VM, devices on your computer | `demo/cloud/control-plane.sh` (VM) and `demo/cloud/devices.sh` (computer) | 2, side by side |
 
-Each step says what is about to happen and which requirement it covers, does it, and shows the result. By default the script waits for **Enter** before each step so you can talk; `--auto` runs straight through (about 2 minutes, most of it the 30-second offline timeout).
+Each step says what is about to happen and which requirement it covers, does it, and shows the result. By default the script waits for **Enter** before each step so you can talk; `--auto` runs straight through (about 4 minutes).
+
+**Real by default, `--simulate` for a clean run.** By default the demo checks what the devices *really* do: install firmware, report crashes, roll back, refuse forged commands. Anything they do not do is printed in red as **✘ NOT WORKING**, with what was seen instead, and the demo carries on; the summary lists every check. Until the device update logic (Iteration 2, David) is done, the device-side checks are expected to be red. `--simulate` keeps the earlier behaviour: the demo fakes the device replies and the crash heartbeat (marked SIMULATED), for presenting before that work lands.
 
 ## What it shows
 
@@ -16,12 +18,15 @@ Each step says what is about to happen and which requirement it covers, does it,
 | 1 | Control plane started by one compose command, all services healthy | NF-6 |
 | 2 | Three simulated devices connect over MQTT and register with version 1.0 and a heartbeat | FR-1, FR-8 |
 | 3 | Three malformed heartbeats are rejected and logged with the reason | Message contract, NF-5 |
-| 4 | A heartbeat reporting a firmware crash is stored with `crash_count` separately from errors | FR-4 groundwork, FR-8 |
+| 4 | Faulty firmware 2.1 is rolled out to device-003: it must install it, report errors after ~10 s and `crash_count` after ~15 s while its heartbeats continue (a crash, not an offline device), then roll back to 1.0 | FR-3, FR-4, FR-8 |
 | 5 | A stopped device is marked offline after the 30 s timeout, then back online on its next heartbeat | Timeout requirement, NF-1 |
-| 6 | The registry's signed firmware: a genuine package verifies; a flipped bit, a forged manifest, a different signing key, and a replayed version are all rejected | FR-6, FR-3 checks |
-| 7 | A manual rollout of 2.0: the orchestrator sends each device its own command (shown in full), follows the replies (one device fails), then rolls the rollout back to 1.0. Every decision is recorded with its reason | Iteration 2 orchestrator commands, NF-5 |
+| 6 | The registry's signed firmware: the reference checks accept the genuine package and reject a flipped bit, a forged manifest, a different signing key and a replayed version. Then two forged update commands are published straight to device-002 (the broker has no authentication yet); it must refuse both and stay on 1.0 | FR-6, FR-3 |
+| 7 | Rollout of 2.0 to every device: each device's command is shown in full; each must report `update_succeeded` and then 2.0 in its heartbeats; the rollout must complete with every device updated | Orchestrator commands, FR-3, NF-5 |
+| 8 | Rollback of that rollout: each device must report `rollback_succeeded` and 1.0 again; the rollout must end `rolled_back` | FR-5 path, NF-1, NF-5 |
 
-Step 4 publishes the heartbeat a device running faulty 2.1 will send, because the agent does not run firmware yet. In step 7 the commands are real (the device containers receive them), but the devices' replies are simulated by the script, because the agent does not install firmware yet; the step says so on screen, and the replies get removed once it does. Step 6 runs the device's verification checks (`verify_package()` in `tools/release.py`) on a real download from the registry; tampering happens in memory only.
+What the devices are expected to do comes from section 4 of `deploy/mqtt/mqtt-topics-and-messages.md` and from `firmware/README.md`. The demo checks it from the outside, over MQTT (a listener records every heartbeat, event and command), so the same checks run in local and cloud mode. The local demo starts its control plane with a 30 s command timeout, so a rollout whose devices never answer ends quickly instead of blocking the next step.
+
+**Testing a device agent with the demo.** `DEVICE_AGENT_DIR=<folder> demo/local/demo.sh` builds the demo's devices from another folder (for example a work-in-progress agent) instead of `deploy/device-agent/`. When every device-side check passes, the summary says "Everything the demo checks is working".
 
 ## Requirements
 
@@ -67,7 +72,7 @@ It updates the code, starts the control plane, applies database migrations, prin
 - **Current rollout**: the latest rollout's state, each device's state, and its last decisions
 - **Orchestrator decisions**: rollout commands and replies, rejected messages, offline devices
 
-Keys in the live view: **u** starts a rollout of 2.0 to every online device, **b** rolls back the latest rollout, **q** closes the view. In step 7, `devices.sh` tells you when to press them. The same actions are available as `docker compose exec orchestrator python cli.py ...` (see `deploy/README.md`).
+Keys in the live view: **f** rolls out the faulty 2.1 to device-003 (step 4), **u** starts a rollout of 2.0 to every online device (step 7), **b** rolls back the latest rollout (steps 4 and 8), **q** closes the view. `devices.sh` tells you when to press each. The same actions are available as `docker compose exec orchestrator python cli.py ...` (see `deploy/README.md`).
 
 Ctrl+C (or q) closes the live view; the control plane keeps running. `--view` reopens just the view; `--no-pull` skips `git pull`.
 

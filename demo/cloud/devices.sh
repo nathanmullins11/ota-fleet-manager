@@ -6,6 +6,7 @@
 #   demo/cloud/devices.sh <vm-ip>           # pauses before each step: press Enter
 #   demo/cloud/devices.sh <vm-ip> --auto    # runs straight through
 #   demo/cloud/devices.sh <vm-ip> --keep    # leave the devices running afterwards
+#   demo/cloud/devices.sh <vm-ip> --simulate  # fake the device replies
 #
 # The VM's security group must allow TCP 1883 (MQTT) from your IP, and TCP 8080
 # (software registry) for the signed-firmware step.
@@ -17,7 +18,8 @@ for arg in "$@"; do
     case "$arg" in
         --auto) export AUTO=1 ;;
         --keep) KEEP=1 ;;
-        -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --simulate) export SIMULATE=1 ;;
+        -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
         *) VM_HOST=$arg ;;
     esac
@@ -71,6 +73,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 
 build_images
+[[ "${SIMULATE:-0}" == 1 ]] && warn "--simulate: device replies are faked by the demo (marked SIMULATED)."
 pause 1
 
 run_steps

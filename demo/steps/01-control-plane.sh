@@ -12,15 +12,24 @@ if [[ "$CP_LOCAL" == 1 ]]; then
     fi
     cp_compose ps --format "table {{.Service}}\t{{.Status}}" | indent
     echo
-    ok "All four control plane services are running (health checks passed)."
+    check_pass "All four control plane services are running (health checks passed)."
 else
     say "The control plane runs on the VM, started by demo/cloud/control-plane.sh."
-    ok "Broker reachable at $MQTT_HOST:$MQTT_PORT"
+    check_pass "Broker reachable at $MQTT_HOST:$MQTT_PORT"
     if [[ "$REGISTRY_REACHABLE" == 1 ]]; then
-        ok "Software registry reachable at $REGISTRY_URL"
+        check_pass "Software registry reachable at $REGISTRY_URL"
     else
         warn "Software registry at $REGISTRY_URL is not reachable from here (port 8080 closed?)."
     fi
     look_at_vm "the Services panel shows mosquitto, postgres and software-registry as healthy."
+fi
+
+# From here on the demo watches every device's heartbeats, events and commands over MQTT.
+start_listener
+if wait_until 10 "connecting the demo's MQTT listener" listener_running && sleep 2 && listener_running; then
+    info "The demo's MQTT listener is watching heartbeats, events and commands."
+else
+    check_fail "the demo's MQTT listener could not connect to the broker at $MQTT_HOST:$MQTT_PORT" \
+               "$(docker logs --tail 2 "$LISTENER" 2>&1 | tr '\n' ' ')"
 fi
 pause

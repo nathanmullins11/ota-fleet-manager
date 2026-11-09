@@ -96,8 +96,8 @@ render_view() {
     local ip=$1 message=$2
     printf '%s  OTA control plane  %s%s   %s%s%s\n' \
         "$BOLD$CYAN" "$ip" "$RESET" "$DIM" "$(date -u '+%H:%M:%S UTC')" "$RESET"
-    printf '  %sKeys: %su%s update fleet to 2.0   %sb%s roll back latest rollout   %sq%s leave view%s\n\n' \
-        "$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET"
+    printf '  %sKeys: %sf%s faulty 2.1 to device-003   %su%s update fleet to 2.0   %sb%s roll back latest rollout   %sq%s leave view%s\n\n' \
+        "$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET"
     if [[ -n "$message" ]]; then
         printf '%sLast action%s\n%s\n\n' "$BOLD" "$RESET" "$message" | sed '2,$s/^/   /'
     fi
@@ -168,6 +168,11 @@ run_key_action() {
             cp_compose exec -T orchestrator python cli.py rollout start 2.0 --all 2>&1 \
                 | grep -v -E "^$|Follow it|cli.py rollout status"
             ;;
+        f)
+            printf '$ cli.py rollout start 2.1 --devices device-003\n'
+            cp_compose exec -T orchestrator python cli.py rollout start 2.1 --devices device-003 2>&1 \
+                | grep -v -E "^$|Follow it|cli.py rollout status"
+            ;;
         b)
             local rid
             rid=$(cp_psql -Atc "SELECT id FROM rollouts ORDER BY id DESC LIMIT 1;" 2>/dev/null)
@@ -205,7 +210,7 @@ live_view() {
             sleep 2
         fi
         case "$key" in
-            u|b) message=$(run_key_action "$key") ;;
+            u|b|f) message=$(run_key_action "$key") ;;
             q) leave_view ;;
         esac
     done

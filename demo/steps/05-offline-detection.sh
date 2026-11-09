@@ -12,12 +12,12 @@ echo
 if [[ "$CP_LOCAL" == 1 ]]; then
     if wait_until 75 "waiting for the orchestrator to notice (timeout is 30 s)" \
             status_is device-002 offline; then
-        ok "device-002 marked offline ${WAITED}s after it stopped."
+        check_pass "device-002 marked offline ${WAITED}s after it stopped."
         orchestrator_log "$since" "marked offline" | sed 's/^[0-9-]* [0-9:,]* //' | indent
         echo
         show_fleet
     else
-        bad "device-002 was not marked offline within 75 s."
+        check_fail "device-002 was not marked offline within 75 s."
     fi
 else
     look_at_vm "within about 30-35 s, device-002 turns offline and 'marked offline' appears in the log."
@@ -31,10 +31,10 @@ docker start "$(device_name 2)" >/dev/null
 echo
 if [[ "$CP_LOCAL" == 1 ]]; then
     if wait_until 30 "waiting for its next heartbeat" status_is device-002 healthy; then
-        ok "device-002 back online (healthy) ${WAITED}s after restarting, on its first heartbeat."
+        check_pass "device-002 back online (healthy) ${WAITED}s after restarting, on its first heartbeat."
         show_fleet
     else
-        bad "device-002 did not come back within 30 s."
+        check_fail "device-002 did not come back within 30 s."
     fi
 else
     look_at_vm "device-002 returns to healthy within a few seconds."
