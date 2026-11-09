@@ -1,3 +1,0 @@
-OTA placeholder firmware
-version: 1.0
-behavior: healthy baseline

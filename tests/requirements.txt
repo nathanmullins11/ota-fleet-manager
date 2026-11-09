@@ -3,3 +3,4 @@ httpx
 fastapi==0.115.6
 paho-mqtt==2.1.0
 psycopg[binary]==3.2.3
+cryptography==50.0.2

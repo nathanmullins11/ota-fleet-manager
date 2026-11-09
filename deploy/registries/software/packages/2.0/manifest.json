@@ -1,0 +1,9 @@
+{
+  "entrypoint": "main.py",
+  "filename": "firmware.tar.gz",
+  "notes": "healthy update",
+  "schema_version": 1,
+  "sha256": "a320083e937e3ed6f4622d154dbf79405729345e8bc747ae9b4a0dd98b358aa4",
+  "size_bytes": 757,
+  "version": "2.0"
+}

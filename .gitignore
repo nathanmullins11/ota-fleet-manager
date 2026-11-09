@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+
+# Release signing key: stays on the release machine, never committed.
+keys/release-private.pem

@@ -38,6 +38,7 @@ CREATE TABLE devices (
     status            TEXT NOT NULL DEFAULT 'unknown'
         CHECK (status IN ('unknown', 'healthy', 'degraded', 'unhealthy', 'updating', 'offline')),
     error_count       INTEGER NOT NULL DEFAULT 0,    -- errors since last report/restart
+    crash_count       INTEGER NOT NULL DEFAULT 0,    -- firmware crashes since last report
     rollout_group     TEXT REFERENCES rollout_groups(name),
     last_heartbeat    TIMESTAMPTZ,
     registered_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -57,6 +58,7 @@ CREATE TABLE heartbeats (
     reported_version TEXT,
     status           TEXT,
     error_count      INTEGER,
+    crash_count      INTEGER NOT NULL DEFAULT 0,
     reported_at      TIMESTAMPTZ,                    -- timestamp from the device
     received_at      TIMESTAMPTZ NOT NULL DEFAULT now()  -- timestamp at the orchestrator
 );
@@ -112,6 +114,7 @@ SELECT device_id,
        current_version,
        status,
        error_count,
+       crash_count,
        rollout_group,
        last_heartbeat,
        EXTRACT(EPOCH FROM (now() - last_heartbeat))::INTEGER AS seconds_since_heartbeat
@@ -126,23 +129,25 @@ INSERT INTO rollout_groups (name, stage_order) VALUES
     ('stage_50',  3),
     ('stage_100', 4);
 
--- Placeholder baseline so devices reporting '1.0' in Iteration 1 match a known version.
+-- Placeholder baseline. The orchestrator replaces it at startup with the software
+-- registry's versions and checksums (and adds the others).
 INSERT INTO firmware_versions (version, notes) VALUES
-    ('1.0', 'baseline (placeholder until packages exist in Iteration 2)');
+    ('1.0', 'baseline (replaced from the software registry when the orchestrator starts)');
 
 -- ---------------------------------------------------------------------------
 -- Example: how the orchestrator records a heartbeat (psycopg / SQLAlchemy).
 -- Upsert the device's current state, then append to history:
 --
---   INSERT INTO devices (device_id, current_version, status, error_count, last_heartbeat)
---   VALUES (%(id)s, %(version)s, %(status)s, %(errors)s, now())
+--   INSERT INTO devices (device_id, current_version, status, error_count, crash_count, last_heartbeat)
+--   VALUES (%(id)s, %(version)s, %(status)s, %(errors)s, %(crashes)s, now())
 --   ON CONFLICT (device_id) DO UPDATE
 --     SET current_version = EXCLUDED.current_version,
 --         status          = EXCLUDED.status,
 --         error_count     = EXCLUDED.error_count,
+--         crash_count     = EXCLUDED.crash_count,
 --         last_heartbeat  = EXCLUDED.last_heartbeat,
 --         updated_at      = now();
 --
---   INSERT INTO heartbeats (device_id, reported_version, status, error_count, reported_at)
---   VALUES (%(id)s, %(version)s, %(status)s, %(errors)s, %(device_ts)s);
+--   INSERT INTO heartbeats (device_id, reported_version, status, error_count, crash_count, reported_at)
+--   VALUES (%(id)s, %(version)s, %(status)s, %(errors)s, %(crashes)s, %(device_ts)s);
 -- ---------------------------------------------------------------------------

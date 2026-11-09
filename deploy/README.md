@@ -41,14 +41,22 @@ Expected: the orchestrator logged `Connected to broker mosquitto:1883`. The seco
 curl localhost:8080/health
 curl localhost:8080/versions
 curl localhost:8080/versions/2.1
-curl -O localhost:8080/packages/2.0        # downloads the package
+curl -o firmware-2.0.tar.gz localhost:8080/packages/2.0   # downloads the package
+curl localhost:8080/packages/2.0/manifest                  # the signed manifest
+curl localhost:8080/packages/2.0/manifest.sig              # the signature over it
 ```
 
-Expected: `/versions` lists `1.0`, `2.0`, and `2.1` with a SHA-256 checksum each. A download includes an `X-Checksum-SHA256` header (add `-i` to `curl` to see it).
+Expected: `/versions` lists `1.0`, `2.0`, and `2.1`, each with a SHA-256 checksum, notes, and its download, manifest and signature URLs. A download includes an `X-Checksum-SHA256` header (add `-i` to `curl` to see it).
+
+To check the published packages exactly as a device will (signature, version, checksum), run this from the repository root on any machine with `pip install -r tools/requirements.txt`:
+
+```bash
+python tools/release.py verify 1.0 2.0 2.1 --registry http://localhost:8080
+```
 
 You can also open `http://localhost:8080/docs` in a browser for an interactive list of the endpoints.
 
-To add a version, drop a file named `<version>.<ext>` (for example `3.0.txt` or `3.0.tar.gz`) into `registries/software/packages/`. No restart or rebuild is needed.
+Each version is a folder in `registries/software/packages/` holding `firmware.tar.gz`, `manifest.json` and `manifest.sig`. The registry serves only complete folders; `/health` returns 503 and names any folder that is missing a file or has a manifest for a different version. Versions are built and signed with `tools/release.py` (see `firmware/README.md`). No restart or rebuild is needed after adding one.
 
 ## Test the device registry
 
@@ -90,9 +98,9 @@ docker compose exec postgres psql -U ota -d ota -c "INSERT INTO devices (device_
 
 For the schema design and example dashboard queries, see `registries/postgres/database-schema.md`.
 
-## Orchestrator (skeleton)
+## Orchestrator
 
-The orchestrator connects to the MQTT broker, records heartbeats in the device registry, and marks devices `offline` when their heartbeats stop. Compose starts it after `mosquitto` and `postgres` report healthy.
+The orchestrator connects to the MQTT broker, records heartbeats in the device registry, marks devices `offline` when their heartbeats stop, and runs rollouts: it sends update and rollback commands and records what the devices report. At startup it copies the software registry's versions and checksums into `firmware_versions`. Compose starts it after `mosquitto`, `postgres` and `software-registry` report healthy.
 
 To test it without a device, publish a heartbeat by hand:
 
@@ -105,7 +113,37 @@ Expected: `device-001` appears with its version and a recent heartbeat. Stop pub
 
 To test with a simulated device, see `device-agent/README.md`.
 
-Settings are environment variables (see `orchestrator/config.py`): `MQTT_HOST`, `DB_HOST`, `HEARTBEAT_TIMEOUT_SECONDS`, `LOG_LEVEL`, and others.
+Settings are environment variables (see `orchestrator/config.py` and `.env.example`): `MQTT_HOST`, `DB_HOST`, `HEARTBEAT_TIMEOUT_SECONDS`, `REGISTRY_PUBLIC_URL`, `COMMAND_TIMEOUT_SECONDS`, `LOG_LEVEL`, and others.
+
+## Run a rollout (manual update and rollback)
+
+Rollouts are started from the CLI inside the orchestrator container. The CLI only records the request in the database; the running orchestrator sends the commands within about a second, follows the devices' events, and logs every decision with its reason (`docker compose logs -f orchestrator`).
+
+```bash
+docker compose exec orchestrator python cli.py versions                  # firmware in the registry
+docker compose exec orchestrator python cli.py devices                   # fleet, with previous versions
+docker compose exec orchestrator python cli.py rollout start 2.0 --all   # or --devices device-001,device-002
+docker compose exec orchestrator python cli.py rollout status --watch    # latest rollout, live
+docker compose exec orchestrator python cli.py rollout rollback 1        # send rollout 1's devices back
+docker compose exec orchestrator python cli.py rollout list
+```
+
+**Rules:**
+
+- One rollout at a time. A new one is refused while another is `pending`, `in_progress` or `halted`.
+- Offline devices are skipped (a command sent now would never reach them), and devices already on the target version get no command. Both are listed when the rollout is created and recorded in its `started` decision.
+- The rollback version defaults to the version the commanded devices run now; if they run different versions, give it with `--rollback-to`.
+- A device that does not answer a command within `COMMAND_TIMEOUT_SECONDS` (default 120) is marked `failed`, so a rollout always finishes.
+- A rollout is `completed` once every device has answered, even if some failed. Rolling back is your decision for now; Iteration 3 makes it automatic.
+- `rollback` works on `in_progress` and `completed` rollouts and sends every device in the rollout back to its rollback version.
+
+Each device gets its own command on `ota/devices/{id}/commands`; there is no broadcast topic. Commands carry download URLs built from `REGISTRY_PUBLIC_URL`, the registry address **as the devices see it**: the default `http://host.docker.internal:8080` suits devices on the same machine; on the cloud VM set it to `http://<elastic-ip>:8080` in `.env` (`demo/cloud/control-plane.sh` does this for you).
+
+Until the device agent installs firmware, you can play a device's part by publishing its events by hand:
+
+```bash
+docker compose exec mosquitto mosquitto_pub -q 1 -t ota/devices/device-001/events -m '{"schema_version":1,"device_id":"device-001","event":"update_succeeded","rollout_id":1,"version":"2.0","reason":null,"timestamp":"2026-11-05T12:00:00Z"}'
+```
 
 ## Run the registry unit tests
 

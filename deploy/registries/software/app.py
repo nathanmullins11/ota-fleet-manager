@@ -1,30 +1,43 @@
-"""Software registry: serves versioned firmware packages to the fleet.
+"""Software registry: serves signed firmware packages to the fleet.
 
-Packages are plain files in PACKAGES_DIR named <version><extension>, for example
-1.0.txt, 2.0.txt, 2.1.tar.gz. The version is taken from the file name, and the
-SHA-256 checksum is computed from the file contents, so adding a version means
-dropping a file in the folder (no database or restart needed).
+Each version is a folder in PACKAGES_DIR, built and signed by tools/release.py:
+
+  2.0/firmware.tar.gz   the package
+  2.0/manifest.json     version, size and SHA-256 of the package
+  2.0/manifest.sig      Ed25519 signature over the exact bytes of manifest.json (base64)
+
+The registry only serves versions that have all three files and a manifest that names
+the folder's version (FR-6: only signed packages are published). It does not hold the
+public key or check signatures: devices do that. So if this server, or a file on it,
+is tampered with, devices still refuse the package.
+
+Adding a version means copying its folder in; no restart or rebuild is needed.
 
 Endpoints:
-  GET /health               liveness check
-  GET /versions             list all available versions with checksums
-  GET /versions/{version}   metadata for one version
-  GET /packages/{version}   download the package file
+  GET /health                          liveness check (503 if a version folder is invalid)
+  GET /versions                        all available versions with checksums
+  GET /versions/{version}              metadata for one version
+  GET /packages/{version}              download the package
+  GET /packages/{version}/manifest     the manifest, byte for byte as signed
+  GET /packages/{version}/manifest.sig the signature over the manifest
 """
 import hashlib
+import json
 import logging
 import os
 import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 PACKAGES_DIR = Path(os.environ.get("PACKAGES_DIR", Path(__file__).parent / "packages")).resolve()
 
-# "2.1.tar.gz" -> version "2.1", extension ".tar.gz"; "1.0.txt" -> "1.0", ".txt"
+PACKAGE_FILE = "firmware.tar.gz"
+MANIFEST_FILE = "manifest.json"
+SIGNATURE_FILE = "manifest.sig"
+
 # Always used with fullmatch() and re.ASCII: no trailing newline, digits 0-9 only.
-FILENAME_RE = re.compile(r"(?P<version>\d+\.\d+(?:\.\d+)?)(?P<ext>\..+)", re.ASCII)
 VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)?", re.ASCII)
 
 log = logging.getLogger("software-registry")
@@ -40,55 +53,74 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _scan_all() -> tuple[dict[str, Path], dict[str, list[str]]]:
+def _problem(version: str, folder: Path) -> str | None:
+    """Why this version folder cannot be served, or None if it can."""
+    for name in (PACKAGE_FILE, MANIFEST_FILE, SIGNATURE_FILE):
+        if not (folder / name).is_file():
+            return f"missing {name}"
+    try:
+        manifest = json.loads((folder / MANIFEST_FILE).read_bytes())
+    except ValueError:
+        return "manifest is not valid JSON"
+    if not isinstance(manifest, dict) or manifest.get("version") != version:
+        return "manifest version does not match folder name"
+    return None
+
+
+def _scan_all() -> tuple[dict[str, Path], dict[str, str]]:
     """Scan PACKAGES_DIR once.
 
-    Returns (packages, duplicates): packages maps version -> file for every version
-    backed by exactly one file; duplicates maps version -> file names for every
-    version claimed by more than one file (for example 1.0.txt and 1.0.tar.gz).
+    Returns (packages, invalid): packages maps version -> folder for every servable
+    version; invalid maps version -> reason for every version folder that is not.
+    Entries whose name is not a version are ignored.
     """
-    by_version: dict[str, list[Path]] = {}
+    packages: dict[str, Path] = {}
+    invalid: dict[str, str] = {}
     if PACKAGES_DIR.is_dir():
-        for path in sorted(PACKAGES_DIR.iterdir()):
-            match = FILENAME_RE.fullmatch(path.name)
-            if path.is_file() and match:
-                by_version.setdefault(match["version"], []).append(path)
-    packages = {v: paths[0] for v, paths in by_version.items() if len(paths) == 1}
-    duplicates = {v: [p.name for p in paths] for v, paths in by_version.items() if len(paths) > 1}
-    return packages, duplicates
+        for folder in sorted(PACKAGES_DIR.iterdir()):
+            if not (folder.is_dir() and VERSION_RE.fullmatch(folder.name)):
+                continue
+            problem = _problem(folder.name, folder)
+            if problem:
+                invalid[folder.name] = problem
+            else:
+                packages[folder.name] = folder
+    return packages, invalid
 
 
 def _scan() -> dict[str, Path]:
-    """Map version -> file for every unambiguous package in PACKAGES_DIR.
-
-    A version claimed by more than one file is left out rather than served, because
-    which file a device would receive would depend on sort order. /health reports it.
-    """
-    packages, duplicates = _scan_all()
-    for version, names in duplicates.items():
-        log.warning("Version %s is claimed by several files %s; not serving it", version, names)
+    packages, invalid = _scan_all()
+    for version, reason in invalid.items():
+        log.warning("Not serving version %s: %s", version, reason)
     return packages
 
 
-def _describe(version: str, path: Path) -> dict:
+def _describe(version: str, folder: Path) -> dict:
+    package = folder / PACKAGE_FILE
+    manifest = json.loads((folder / MANIFEST_FILE).read_bytes())
     return {
         "version": version,
-        "filename": path.name,
-        "size_bytes": path.stat().st_size,
-        "sha256": _sha256(path),
+        "filename": PACKAGE_FILE,
+        "size_bytes": package.stat().st_size,
+        # Computed from the file actually served, not copied from the manifest, so a
+        # tampered file shows up as a mismatch on the device rather than being hidden.
+        "sha256": _sha256(package),
+        "notes": manifest.get("notes", ""),
         "download_url": f"/packages/{version}",
+        "manifest_url": f"/packages/{version}/manifest",
+        "signature_url": f"/packages/{version}/manifest.sig",
     }
 
 
 @app.get("/health")
 def health():
-    packages, duplicates = _scan_all()
-    if duplicates:
+    packages, invalid = _scan_all()
+    if invalid:
         # 503 makes the compose healthcheck fail, so the problem is visible in `docker compose ps`.
         return JSONResponse(status_code=503, content={
             "status": "error",
             "versions_available": len(packages),
-            "duplicate_versions": duplicates,
+            "invalid_versions": invalid,
         })
     return {"status": "ok", "versions_available": len(packages)}
 
@@ -103,25 +135,36 @@ def list_versions() -> list[dict]:
 
 @app.get("/versions/{version}")
 def get_version(version: str) -> dict:
-    path = _lookup(version)
-    return _describe(version, path)
+    return _describe(version, _lookup(version))
 
 
 @app.get("/packages/{version}")
 def download_package(version: str) -> FileResponse:
-    path = _lookup(version)
+    path = _lookup(version) / PACKAGE_FILE
     return FileResponse(
         path,
-        filename=path.name,
+        media_type="application/gzip",
+        filename=f"firmware-{version}.tar.gz",
         headers={"X-Checksum-SHA256": _sha256(path)},
     )
+
+
+@app.get("/packages/{version}/manifest")
+def get_manifest(version: str) -> Response:
+    # Raw bytes: the signature covers them exactly, so they must not be re-serialized.
+    return Response((_lookup(version) / MANIFEST_FILE).read_bytes(), media_type="application/json")
+
+
+@app.get("/packages/{version}/manifest.sig")
+def get_signature(version: str) -> Response:
+    return Response((_lookup(version) / SIGNATURE_FILE).read_bytes(), media_type="text/plain")
 
 
 def _lookup(version: str) -> Path:
     # Validate before touching the filesystem (blocks path traversal like "../x").
     if not VERSION_RE.fullmatch(version):
         raise HTTPException(status_code=400, detail="Invalid version format")
-    path = _scan().get(version)
-    if path is None:
+    folder = _scan().get(version)
+    if folder is None:
         raise HTTPException(status_code=404, detail=f"Version {version} not found")
-    return path
+    return folder

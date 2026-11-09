@@ -21,7 +21,7 @@ EVENT_NAMES = {
 VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)?", re.ASCII)
 
 # Upper bounds of the database columns these fields are stored in (init.sql).
-INT4_MAX = 2**31 - 1    # INTEGER: devices.error_count, heartbeats.error_count
+INT4_MAX = 2**31 - 1    # INTEGER: error_count and crash_count in devices and heartbeats
 INT8_MAX = 2**63 - 1    # BIGINT:  rollouts.id (rollout_id)
 
 
@@ -35,6 +35,7 @@ class Heartbeat:
     version: str
     status: str
     error_count: int
+    crash_count: int
     timestamp: datetime
 
 
@@ -73,6 +74,11 @@ def _int(data: dict, key: str, minimum: int = 0, maximum: int = INT4_MAX) -> int
     return value
 
 
+def _optional_int(data: dict, key: str, default: int = 0) -> int:
+    """Like _int, but an absent key gives the default. An explicit null is still rejected."""
+    return _int(data, key) if key in data else default
+
+
 def _version(data: dict, key: str) -> str:
     value = data.get(key)
     if not isinstance(value, str) or not VERSION_RE.fullmatch(value):
@@ -106,6 +112,8 @@ def parse_heartbeat(topic_device_id: str, payload: bytes) -> Heartbeat:
         version=_version(data, "version"),
         status=status,
         error_count=_int(data, "error_count"),
+        # Optional so agents that predate crash reporting stay valid.
+        crash_count=_optional_int(data, "crash_count"),
         timestamp=_timestamp(data),
     )
 

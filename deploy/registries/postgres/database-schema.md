@@ -42,9 +42,9 @@ This is acceptable during development. Once real experiment data exists, back it
 | `heartbeats` | Every report received (history) | Iteration 1 |
 | `firmware_versions` | Metadata for each package in the software registry | Iteration 1 |
 | `rollout_groups` | The stages a device can belong to | Iteration 1 |
-| `rollouts` | One row per release of a version to the fleet | Iteration 2-3 |
-| `rollout_devices` | Each device's outcome within a rollout | Iteration 3 |
-| `rollout_events` | Log of every orchestrator decision with its reason | Iteration 3 |
+| `rollouts` | One row per release of a version to the fleet | Iteration 2 |
+| `rollout_devices` | Each device's outcome within a rollout | Iteration 2 |
+| `rollout_events` | Log of every orchestrator decision with its reason | Iteration 2 |
 | `fleet_overview` (view) | `devices` plus seconds since last heartbeat | Iteration 1 |
 
 ```mermaid
@@ -62,6 +62,7 @@ erDiagram
         text previous_version
         text status
         int error_count
+        int crash_count
         text rollout_group FK
         timestamptz last_heartbeat
     }
@@ -71,6 +72,7 @@ erDiagram
         text reported_version
         text status
         int error_count
+        int crash_count
         timestamptz reported_at
         timestamptz received_at
     }
@@ -119,6 +121,7 @@ The current state of the fleet. The orchestrator updates a device's row on every
 | `previous_version` | The version the device keeps locally for rollback |
 | `status` | One of the allowed status values (section 6) |
 | `error_count` | Errors the device reported in its latest heartbeat |
+| `crash_count` | Firmware crashes the device reported in its latest heartbeat |
 | `rollout_group` | The stage in which this device receives updates |
 | `last_heartbeat` | When the orchestrator last heard from the device |
 | `registered_at`, `updated_at` | Bookkeeping timestamps |
@@ -137,7 +140,9 @@ Four seeded stages: `canary` (1), `stage_10` (2), `stage_50` (3), `stage_100` (4
 
 ### `rollouts`, `rollout_devices`, `rollout_events`
 
-These are used once rollouts are automated.
+Used from Iteration 2 for manual rollouts (`orchestrator/cli.py`); Iteration 3 adds stages and automatic halts.
+
+**Life cycle** (`rollouts.state`): `pending` (created by the CLI) → `in_progress` (commands sent) → `completed` (every device answered). A rollback request sets `halted`; once every device has answered the rollback commands, `rolled_back`. Per device (`rollout_devices.state`): `pending` → `commanded` → `updated` or `failed`; after a rollback request `commanded` → `rolled_back` or `failed`. The rules are in `orchestrator/rollout_logic.py`. When a device reports `update_succeeded`, `devices.previous_version` is set to the rollout's `rollback_version`.
 
 - `rollouts` records the release: the version being rolled out, the `rollback_version` (last known good), the state, the current stage, and a `halt_reason` if it stopped.
 - `rollout_devices` records, per device, whether it was commanded, updated, failed, or rolled back. Counting these gives **percent of fleet exposed** to a bad update.
@@ -171,6 +176,7 @@ These values must match exactly between the agent, the orchestrator, and the dat
 | version | `devices.current_version`, `heartbeats.reported_version` |
 | status | `devices.status`, `heartbeats.status` |
 | error count | `devices.error_count`, `heartbeats.error_count` |
+| crash count | `devices.crash_count`, `heartbeats.crash_count` |
 | device timestamp | `heartbeats.reported_at` |
 | (set on arrival) | `devices.last_heartbeat`, `heartbeats.received_at` |
 
@@ -179,20 +185,29 @@ If the agent sends more fields (CPU, uptime, error rate), add columns to `heartb
 **Recording a heartbeat** uses an upsert on `devices`, then an insert into `heartbeats`:
 
 ```sql
-INSERT INTO devices (device_id, current_version, status, error_count, last_heartbeat)
-VALUES (%(id)s, %(version)s, %(status)s, %(errors)s, now())
+INSERT INTO devices (device_id, current_version, status, error_count, crash_count, last_heartbeat)
+VALUES (%(id)s, %(version)s, %(status)s, %(errors)s, %(crashes)s, now())
 ON CONFLICT (device_id) DO UPDATE
   SET current_version = EXCLUDED.current_version,
       status          = EXCLUDED.status,
       error_count     = EXCLUDED.error_count,
+      crash_count     = EXCLUDED.crash_count,
       last_heartbeat  = EXCLUDED.last_heartbeat,
       updated_at      = now();
 
-INSERT INTO heartbeats (device_id, reported_version, status, error_count, reported_at)
-VALUES (%(id)s, %(version)s, %(status)s, %(errors)s, %(device_ts)s);
+INSERT INTO heartbeats (device_id, reported_version, status, error_count, crash_count, reported_at)
+VALUES (%(id)s, %(version)s, %(status)s, %(errors)s, %(crashes)s, %(device_ts)s);
 ```
 
 Run both statements in one transaction so the two tables never disagree.
+
+**Upgrading an existing database.** `init.sql` only runs when the Postgres volume is empty. To add `crash_count` to a database created before it existed, without losing data:
+
+```bash
+docker compose exec -T postgres psql -U ota -d ota < registries/postgres/migrations/001_crash_count.sql
+```
+
+The migration is safe to run more than once. Alternatively, `docker compose down -v` deletes the volume so `init.sql` runs again on the next start (all device and heartbeat data is lost).
 
 ## 7. Example queries
 

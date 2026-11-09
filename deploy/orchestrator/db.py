@@ -13,19 +13,23 @@ from messages import Heartbeat
 log = logging.getLogger("orchestrator.db")
 
 UPSERT_DEVICE = """
-    INSERT INTO devices (device_id, current_version, status, error_count, last_heartbeat)
-    VALUES (%(device_id)s, %(version)s, %(status)s, %(error_count)s, now())
+    INSERT INTO devices (device_id, current_version, status, error_count, crash_count,
+                         last_heartbeat)
+    VALUES (%(device_id)s, %(version)s, %(status)s, %(error_count)s, %(crash_count)s, now())
     ON CONFLICT (device_id) DO UPDATE
       SET current_version = EXCLUDED.current_version,
           status          = EXCLUDED.status,
           error_count     = EXCLUDED.error_count,
+          crash_count     = EXCLUDED.crash_count,
           last_heartbeat  = EXCLUDED.last_heartbeat,
           updated_at      = now()
 """
 
 INSERT_HEARTBEAT = """
-    INSERT INTO heartbeats (device_id, reported_version, status, error_count, reported_at)
-    VALUES (%(device_id)s, %(version)s, %(status)s, %(error_count)s, %(timestamp)s)
+    INSERT INTO heartbeats (device_id, reported_version, status, error_count, crash_count,
+                            reported_at)
+    VALUES (%(device_id)s, %(version)s, %(status)s, %(error_count)s, %(crash_count)s,
+            %(timestamp)s)
 """
 
 MARK_OFFLINE = """
@@ -46,7 +50,10 @@ class Database:
         c = self._cfg
         self._conn = psycopg.connect(
             host=c.db_host, port=c.db_port, dbname=c.db_name,
-            user=c.db_user, password=c.db_password, connect_timeout=5)
+            user=c.db_user, password=c.db_password, connect_timeout=5,
+            # Autocommit: plain reads do not leave a transaction open, and every
+            # `with conn.transaction()` block is a real BEGIN ... COMMIT.
+            autocommit=True)
         log.info("Connected to database %s at %s:%s", c.db_name, c.db_host, c.db_port)
 
     def _run(self, work):
@@ -62,10 +69,15 @@ class Database:
                 if attempt == 2:
                     raise
 
+    def run(self, work):
+        """Run work(conn) on this object's connection; see _run. Used by rollouts.py."""
+        return self._run(work)
+
     def record_heartbeat(self, hb: Heartbeat) -> None:
         params = {
             "device_id": hb.device_id, "version": hb.version, "status": hb.status,
-            "error_count": hb.error_count, "timestamp": hb.timestamp,
+            "error_count": hb.error_count, "crash_count": hb.crash_count,
+            "timestamp": hb.timestamp,
         }
 
         def work(conn):

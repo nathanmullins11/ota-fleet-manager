@@ -15,6 +15,9 @@ class Config:
     db_password: str
     heartbeat_timeout_seconds: int   # no heartbeat for this long -> device marked offline
     offline_check_interval_seconds: int
+    registry_url: str                # how the orchestrator reaches the software registry
+    registry_public_url: str         # how devices reach it; goes into command URLs
+    command_timeout_seconds: int     # no event from a commanded device for this long -> failed
     log_level: str
 
 
@@ -34,5 +37,9 @@ def load_config() -> Config:
         db_password=password,
         heartbeat_timeout_seconds=int(os.environ.get("HEARTBEAT_TIMEOUT_SECONDS", "30")),
         offline_check_interval_seconds=int(os.environ.get("OFFLINE_CHECK_INTERVAL_SECONDS", "5")),
+        registry_url=os.environ.get("REGISTRY_URL", "http://software-registry:8080").rstrip("/"),
+        registry_public_url=os.environ.get(
+            "REGISTRY_PUBLIC_URL", "http://host.docker.internal:8080").rstrip("/"),
+        command_timeout_seconds=int(os.environ.get("COMMAND_TIMEOUT_SECONDS", "120")),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
     )

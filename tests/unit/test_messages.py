@@ -17,6 +17,7 @@ def heartbeat(**overrides) -> bytes:
         "version": "1.0",
         "status": "healthy",
         "error_count": 0,
+        "crash_count": 0,
         "timestamp": "2026-10-29T14:03:07Z",
     }
     for key, value in overrides.items():
@@ -73,6 +74,36 @@ def test_error_count_in_range_accepted(messages, value):
 def test_error_count_out_of_range_or_wrong_type_rejected(messages, value):
     with pytest.raises(messages.InvalidMessage, match="error_count must be an integer"):
         messages.parse_heartbeat(DEVICE, heartbeat(error_count=value))
+
+
+# crash_count: optional, same range rules as error_count.
+@pytest.mark.parametrize("value", [0, 1, 2**31 - 1])
+def test_crash_count_in_range_accepted(messages, value):
+    assert messages.parse_heartbeat(DEVICE, heartbeat(crash_count=value)).crash_count == value
+
+
+def test_crash_count_defaults_to_zero_when_absent(messages):
+    # Agents that predate crash reporting must stay valid.
+    hb = messages.parse_heartbeat(DEVICE, heartbeat(crash_count=None))
+    assert hb.crash_count == 0
+
+
+@pytest.mark.parametrize("value", [-1, 2**31, True, 1.0, "0"])
+def test_crash_count_out_of_range_or_wrong_type_rejected(messages, value):
+    with pytest.raises(messages.InvalidMessage, match="crash_count must be an integer"):
+        messages.parse_heartbeat(DEVICE, heartbeat(crash_count=value))
+
+
+def test_crash_count_null_rejected(messages):
+    msg = json.loads(heartbeat())
+    msg["crash_count"] = None
+    with pytest.raises(messages.InvalidMessage, match="crash_count must be an integer"):
+        messages.parse_heartbeat(DEVICE, json.dumps(msg).encode())
+
+
+def test_crash_count_kept_apart_from_error_count(messages):
+    hb = messages.parse_heartbeat(DEVICE, heartbeat(error_count=25, crash_count=1))
+    assert (hb.error_count, hb.crash_count) == (25, 1)
 
 
 # Defect 4: schema_version must be the integer 1, not something equal to it.
