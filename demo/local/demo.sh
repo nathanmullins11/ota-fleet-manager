@@ -4,6 +4,10 @@
 #   demo/local/demo.sh            # pauses before each step: press Enter to continue
 #   demo/local/demo.sh --auto     # runs straight through (rehearsals, recordings)
 #   demo/local/demo.sh --keep     # leave everything running afterwards
+#   demo/local/demo.sh --simulate # fake the device replies (before the device update logic exists)
+#
+# By default the demo checks what the devices really do (install, crash, roll back, reject
+# forged commands) and prints NOT WORKING in red for anything they do not do yet.
 #
 # Uses its own compose project (ota-demo) with a fresh database, so it does not touch a
 # control plane you run yourself from deploy/. Everything it starts is removed at the
@@ -15,7 +19,8 @@ for arg in "$@"; do
     case "$arg" in
         --auto) export AUTO=1 ;;
         --keep) KEEP=1 ;;
-        -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --simulate) export SIMULATE=1 ;;
+        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -26,6 +31,9 @@ export MQTT_HOST=host.docker.internal
 export REGISTRY_URL=http://host.docker.internal:8080
 # Only for the demo's own throwaway database; overrides deploy/.env if there is one.
 export POSTGRES_PASSWORD="demo-$RANDOM$RANDOM"
+# Devices that never answer a command are marked failed after this; short, so a missing
+# device feature does not hold up the next step for two minutes.
+export COMMAND_TIMEOUT_SECONDS=30
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
@@ -58,6 +66,7 @@ trap 'exit 130' INT
 banner "OTA Update Fleet Manager — local demo" \
        "Control plane and $DEVICE_COUNT simulated devices on this machine"
 build_images
+[[ "${SIMULATE:-0}" == 1 ]] && warn "--simulate: device replies are faked by the demo (marked SIMULATED)."
 pause 1
 
 run_steps

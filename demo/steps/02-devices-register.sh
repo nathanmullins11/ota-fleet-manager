@@ -20,16 +20,21 @@ for i in $(seq 1 "$DEVICE_COUNT"); do
     fi
 done
 echo
+for i in $(seq 1 "$DEVICE_COUNT"); do
+    d=$(device_id "$i")
+    expect 15 "$d's heartbeat reports firmware 1.0" 0 "$d" hb_is 0 "$d" version 1.0 || true
+done
+echo
 
 if [[ "$CP_LOCAL" == 1 ]]; then
     if wait_until 20 "waiting for the orchestrator to record the heartbeats" \
             at_least_healthy "$DEVICE_COUNT"; then
         say "The device registry (fleet_overview), written by the orchestrator:"
         show_fleet
-        ok "Every device is registered with firmware 1.0 and a heartbeat in the last few seconds."
+        check_pass "Every device is registered with firmware 1.0 and a recent heartbeat"
     else
-        bad "Not all devices reached the registry. Orchestrator log:"
-        cp_compose logs --tail 10 orchestrator | indent
+        check_fail "Not every device reached the device registry" \
+                   "$(cp_compose logs --tail 3 orchestrator 2>&1 | tr '\n' ' ')"
     fi
 else
     look_at_vm "the Fleet table gains device-001 to device-00$DEVICE_COUNT, healthy, version 1.0, last_seen_s near 0."
