@@ -102,9 +102,18 @@ render_view() {
         printf '%sLast action%s\n%s\n\n' "$BOLD" "$RESET" "$message" | sed '2,$s/^/   /'
     fi
 
-    printf '%sServices%s\n' "$BOLD" "$RESET"
-    cp_compose ps --format "{{.Service}}\t{{.Status}}" 2>/dev/null \
-        | awk -F'\t' '{printf "   %-20s %s\n", $1, $2}'
+    printf '%sServices%s %s(status · CPU · memory on this VM)%s\n' "$BOLD" "$RESET" "$DIM" "$RESET"
+    local ids
+    ids=$(cp_compose ps -q 2>/dev/null)
+    {
+        # shellcheck disable=SC2086
+        [[ -n "$ids" ]] && docker stats --no-stream --format 'S|{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' $ids 2>/dev/null
+        cp_compose ps --format 'P|{{.Name}}|{{.Service}}|{{.Status}}' 2>/dev/null
+    } | awk -F'|' '
+        $1 == "S" { split($4, m, " / "); cpu[$2] = $3; mem[$2] = m[1] }
+        $1 == "P" { name[++n] = $2; svc[n] = $3; st[n] = $4 }
+        END { for (i = 1; i <= n; i++)
+                printf "   %-20s %-26s CPU %6s   MEM %s\n", svc[i], st[i], cpu[name[i]], mem[name[i]] }'
 
     printf '\n%sFleet (device registry)%s\n' "$BOLD" "$RESET"
     cp_psql -c "SELECT device_id, current_version AS version, status,

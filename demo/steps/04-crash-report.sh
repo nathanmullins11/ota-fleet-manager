@@ -56,6 +56,8 @@ if begin_rollout 2.1 f "faulty 2.1 to device-003" --devices device-003; then
         [[ -n "$reason" ]] && info "device-003 reported update_failed: $reason"
         check_skip "2.1 running, errors and crash reports on device-003" "2.1 was not installed"
     fi
+    echo
+    show_resources "device-003 running faulty 2.1"
     if [[ "$CP_LOCAL" == 1 ]]; then
         echo
         say "device-003's heartbeat history in the device registry (newest first):"

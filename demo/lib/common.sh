@@ -15,7 +15,7 @@ AUTO=${AUTO:-0}
 CP_LOCAL=${CP_LOCAL:-1}
 CP_PROJECT=${CP_PROJECT:-}
 MQTT_PORT=${MQTT_PORT:-1883}
-DEVICE_COUNT=${DEVICE_COUNT:-3}
+DEVICE_COUNT=${DEVICE_COUNT:-5}
 REGISTRY_REACHABLE=${REGISTRY_REACHABLE:-1}
 SIMULATE=${SIMULATE:-0}
 
@@ -186,11 +186,15 @@ build_images() {
 # A device from deploy/device-agent's own compose stack would share an MQTT client ID
 # with a demo device, and the broker would keep disconnecting one of them.
 check_no_other_devices() {
-    local running
-    running=$(docker ps -q --filter label=com.docker.compose.project=ota-fleet-devices)
-    if [[ -n "$running" ]]; then
-        die "Devices from deploy/device-agent are already running and would clash with the demo devices.
+    if [[ -n "$(docker ps -q --filter label=com.docker.compose.project=ota-fleet-devices)" ]]; then
+        die "Devices from deploy/device-agent's Compose file are running and would clash with the demo devices.
   Stop them first:  (cd deploy/device-agent && docker compose down)"
+    fi
+    local fleet
+    fleet=$(docker ps -q --filter label=ota-fleet=device | wc -l)
+    if ((fleet > 0)); then
+        die "$fleet device(s) from the fleet launcher are running. They share device IDs with the demo's
+  devices and would join its rollouts. Remove them first:  deploy/device-agent/fleet.sh down"
     fi
 }
 
@@ -225,6 +229,45 @@ publish_event() {
     [[ -n "${5:-}" ]] && reason="\"$5\""
     mqtt_pub "ota/devices/$1/events" \
         "{\"schema_version\":1,\"device_id\":\"$1\",\"event\":\"$2\",\"rollout_id\":$3,\"version\":\"$4\",\"reason\":$reason,\"timestamp\":\"$(now_utc)\"}"
+}
+
+# ----------------------------------------------------------------------------- resource use
+# show_resources "when": CPU, memory and network traffic of the demo's device containers
+# (docker stats on this computer), and of the control plane when it runs here too.
+# Network in/out counts since each container started: it grows as messages flow.
+STATS_AWK='
+function mib(s,  v, u) { v = s + 0; u = s; sub(/^[0-9.]+/, "", u)
+    if (u ~ /^k/ || u ~ /^K/) v /= 1024; else if (u ~ /^G/) v *= 1024; else if (u == "B") v /= 1048576
+    return v }
+function kb(s,  v, u) { v = s + 0; u = s; sub(/^[0-9.]+/, "", u)
+    if (u ~ /^M/) v *= 1000; else if (u ~ /^G/) v *= 1000000; else if (u == "B") v /= 1000
+    return v }
+'
+show_resources() {
+    local when=$1 names cp_ids
+    names=$(docker ps --filter "label=$DEMO_LABEL" --format '{{.Names}}' | grep -E '^ota-demo-device-' | sort)
+    [[ -n "$names" ]] || return 0
+    printf '   %sResource use%s %s(%s · docker stats on this computer)%s\n' "$BOLD" "$RESET" "$DIM" "$when" "$RESET"
+    # shellcheck disable=SC2086
+    docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.NetIO}}' $names | sort \
+        | awk -F'|' "$STATS_AWK"'
+            { split($3, m, " / "); split($4, n, " / "); cpu = $2 + 0
+              name = $1; sub(/^ota-demo-/, "", name)
+              printf "      %-12s CPU %5.2f%%   MEM %6.1f MiB   NET in %7.1f kB / out %7.1f kB\n", name, cpu, mib(m[1]), kb(n[1]), kb(n[2])
+              tc += cpu; tm += mib(m[1]); c++ }
+            END { if (c) printf "      %-12s CPU %5.2f%%   MEM %6.1f MiB   (%.1f MiB per device)\n", c " devices", tc, tm, tm / c }'
+    if [[ "$CP_LOCAL" == 1 ]]; then
+        cp_ids=$(cp_compose ps -q 2>/dev/null)
+        if [[ -n "$cp_ids" ]]; then
+            # shellcheck disable=SC2086
+            docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' $cp_ids | sort \
+                | awk -F'|' "$STATS_AWK"'
+                    { split($3, m, " / "); name = $1
+                      if (match(name, /software-registry|orchestrator|mosquitto|postgres/)) name = substr(name, RSTART, RLENGTH)
+                      line = line sprintf("%s%s %.1f%% %.0f MiB", (line ? " · " : ""), name, $2 + 0, mib(m[1])) }
+                    END { if (line) printf "      control plane: %s\n", line }'
+        fi
+    fi
 }
 
 # ----------------------------------------------------------------------------- device listener

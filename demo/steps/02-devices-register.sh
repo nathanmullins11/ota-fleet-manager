@@ -37,6 +37,9 @@ if [[ "$CP_LOCAL" == 1 ]]; then
                    "$(cp_compose logs --tail 3 orchestrator 2>&1 | tr '\n' ' ')"
     fi
 else
-    look_at_vm "the Fleet table gains device-001 to device-00$DEVICE_COUNT, healthy, version 1.0, last_seen_s near 0."
+    look_at_vm "the Fleet table gains device-001 to $(device_id "$DEVICE_COUNT"), healthy, version 1.0, last_seen_s near 0."
 fi
+echo
+sleep 3      # let a few heartbeats flow before measuring
+show_resources "$DEVICE_COUNT devices idle, a heartbeat every 5 s each"
 pause

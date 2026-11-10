@@ -48,3 +48,5 @@ if [[ "$CP_LOCAL" == 1 ]]; then
     say "Final state of the fleet:"
     show_fleet
 fi
+echo
+show_resources "end of the demo"

@@ -50,6 +50,8 @@ if [[ "$SIMULATE" == 1 ]]; then
         fi
     done
     echo
+    show_resources "during the rollout of 2.0"
+    echo
     if [[ "$CP_LOCAL" == 1 ]]; then
         sleep 2
         run_note "python cli.py rollout status $rid"
@@ -127,6 +129,8 @@ if begin_rollout 2.0 u "update every online device to 2.0" --all; then
             [[ -n "$reason" ]] && info "$d reported update_failed: $reason"
         fi
     done
+    echo
+    show_resources "during the rollout of 2.0 to ${#ROLLOUT_TARGETS[@]} devices"
     echo
     if [[ "$CP_LOCAL" == 1 ]]; then
         if ! wait_until $(( ${COMMAND_TIMEOUT_SECONDS:-120} + 15 )) \

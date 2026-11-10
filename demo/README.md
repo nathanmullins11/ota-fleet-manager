@@ -16,7 +16,7 @@ Each step says what is about to happen and which requirement it covers, does it,
 | Step | Shows | Requirements |
 |---|---|---|
 | 1 | Control plane started by one compose command, all services healthy | NF-6 |
-| 2 | Three simulated devices connect over MQTT and register with version 1.0 and a heartbeat | FR-1, FR-8 |
+| 2 | Five simulated devices (`--devices N` for 3 to 50) connect over MQTT and register with version 1.0 and a heartbeat | FR-1, FR-8 |
 | 3 | Three malformed heartbeats are rejected and logged with the reason | Message contract, NF-5 |
 | 4 | Faulty firmware 2.1 is rolled out to device-003: it must install it, report errors after ~10 s and `crash_count` after ~15 s while its heartbeats continue (a crash, not an offline device), then roll back to 1.0 | FR-3, FR-4, FR-8 |
 | 5 | A stopped device is marked offline after the 30 s timeout, then back online on its next heartbeat | Timeout requirement, NF-1 |
