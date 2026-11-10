@@ -291,7 +291,7 @@ cmd_stats() {
 
     printf '%sSampling %d devices%s every %ss for %ss (host: %s CPUs, %s MiB RAM)\n' "$BOLD" "$count" \
         "$RESET" "$interval" "$duration" "$(nproc)" "$(free -m | awk '/^Mem:/ {print $2}')"
-    local end=$((SECONDS + duration)) samples=0 ts line dev cpu mem total_cpu total_mem
+    local end=$((SECONDS + duration)) samples=0 ts dev cpu mem total_cpu total_mem
     local sum_cpu=0 sum_mem=0 peak_cpu=0 peak_mem=0
     while ((SECONDS < end)); do
         ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
