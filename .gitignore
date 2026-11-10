@@ -5,3 +5,6 @@ __pycache__/
 
 # Release signing key: stays on the release machine, never committed.
 keys/release-private.pem
+
+# Fleet launcher measurements (deploy/device-agent/fleet.sh stats)
+deploy/device-agent/fleet-stats/

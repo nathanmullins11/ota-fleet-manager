@@ -7,6 +7,7 @@
 #   demo/cloud/devices.sh <vm-ip> --auto    # runs straight through
 #   demo/cloud/devices.sh <vm-ip> --keep    # leave the devices running afterwards
 #   demo/cloud/devices.sh <vm-ip> --simulate  # fake the device replies
+#   demo/cloud/devices.sh <vm-ip> --devices N # number of simulated devices, 3 to 50 (default 5)
 #
 # The VM's security group must allow TCP 1883 (MQTT) from your IP, and TCP 8080
 # (software registry) for the signed-firmware step.
@@ -14,16 +15,23 @@ set -uo pipefail
 
 KEEP=0
 VM_HOST=${OTA_VM_HOST:-}
-for arg in "$@"; do
+while (($#)); do
+    arg=$1
     case "$arg" in
+        --devices) export DEVICE_COUNT=${2:-}; shift ;;
         --auto) export AUTO=1 ;;
         --keep) KEEP=1 ;;
         --simulate) export SIMULATE=1 ;;
-        -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
         *) VM_HOST=$arg ;;
     esac
+    shift
 done
+if [[ -n "${DEVICE_COUNT:-}" ]] && ! { [[ "$DEVICE_COUNT" =~ ^[0-9]+$ ]] && ((DEVICE_COUNT >= 3 && DEVICE_COUNT <= 50)); }; then
+    echo "--devices must be a number from 3 to 50 (steps use device-002 and device-003)" >&2
+    exit 2
+fi
 if [[ -z "$VM_HOST" ]]; then
     echo "Usage: demo/cloud/devices.sh <vm-ip> [--auto] [--keep]   (or set OTA_VM_HOST)" >&2
     exit 2

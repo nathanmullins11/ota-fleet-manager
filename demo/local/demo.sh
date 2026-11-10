@@ -5,6 +5,7 @@
 #   demo/local/demo.sh --auto     # runs straight through (rehearsals, recordings)
 #   demo/local/demo.sh --keep     # leave everything running afterwards
 #   demo/local/demo.sh --simulate # fake the device replies (before the device update logic exists)
+#   demo/local/demo.sh --devices N  # number of simulated devices, 3 to 50 (default 5)
 #
 # By default the demo checks what the devices really do (install, crash, roll back, reject
 # forged commands) and prints NOT WORKING in red for anything they do not do yet.
@@ -15,15 +16,22 @@
 set -uo pipefail
 
 KEEP=0
-for arg in "$@"; do
+while (($#)); do
+    arg=$1
     case "$arg" in
+        --devices) export DEVICE_COUNT=${2:-}; shift ;;
         --auto) export AUTO=1 ;;
         --keep) KEEP=1 ;;
         --simulate) export SIMULATE=1 ;;
-        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
     esac
+    shift
 done
+if [[ -n "${DEVICE_COUNT:-}" ]] && ! { [[ "$DEVICE_COUNT" =~ ^[0-9]+$ ]] && ((DEVICE_COUNT >= 3 && DEVICE_COUNT <= 50)); }; then
+    echo "--devices must be a number from 3 to 50 (steps use device-002 and device-003)" >&2
+    exit 2
+fi
 
 export CP_LOCAL=1
 export CP_PROJECT=ota-demo
