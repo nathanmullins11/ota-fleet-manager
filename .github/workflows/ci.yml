@@ -1,0 +1,86 @@
+# Runs on every pull request and every push to main. All three jobs must pass to merge.
+#
+#   tests       pytest: unit tests + firmware component tests (no containers needed)
+#   shellcheck  the fleet launcher, bootstrap and demo scripts
+#   docker      both Compose files are valid and every image builds
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or PR cancels the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"        # same as the python:3.12-slim service images
+          cache: pip
+          cache-dependency-path: tests/requirements.txt
+
+      - name: Install test dependencies
+        run: pip install -r tests/requirements.txt
+
+      - name: Run unit and component tests
+        run: pytest -m "unit or component" -ra --junitxml=test-results.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+
+  shellcheck:
+    name: Shell scripts (shellcheck)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # shellcheck is preinstalled on GitHub's Ubuntu runners; .shellcheckrc sets shell=bash.
+      - name: Check scripts
+        run: |
+          shellcheck --version
+          git ls-files '*.sh' ':!demo/steps/*.sh' | xargs shellcheck -S warning
+          # Demo steps are sourced into one shell and share variables across files, so
+          # "assigned but unused" (SC2034) is a false positive there.
+          git ls-files 'demo/steps/*.sh' | xargs shellcheck -S warning -e SC2034
+
+  docker:
+    name: Compose files and images
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      POSTGRES_PASSWORD: ci-only-not-a-secret   # Compose refuses to start without one
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Compose files
+        run: |
+          docker compose -f deploy/docker-compose.yml config --quiet
+          docker compose -f deploy/device-agent/docker-compose.yml config --quiet
+
+      - name: Build control-plane images
+        run: docker compose -f deploy/docker-compose.yml build
+
+      - name: Build device image
+        run: docker build -t ota-device-agent deploy/device-agent
+
+      - name: Build demo tools image
+        run: docker build -t ota-demo-tools -f demo/lib/tools.Dockerfile tools

@@ -1,0 +1,2 @@
+# Demo step files and demo/lib/common.sh are sourced, not executed, so they have no shebang.
+shell=bash
