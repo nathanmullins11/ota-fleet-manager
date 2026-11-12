@@ -16,7 +16,8 @@ def files(packages, version) -> dict:
 
 def tamper_cases(release, signing_key, f):
     """(description, verify_package kwargs) for every attack the reference tests cover."""
-    package = bytearray(f["firmware.tar.gz"]); package[-1] ^= 0xFF
+    package = bytearray(f["firmware.tar.gz"])
+    package[-1] ^= 0xFF
     evil = b"evil firmware"
     forged = json.loads(f["manifest.json"])
     forged.update(sha256=hashlib.sha256(evil).hexdigest(), size_bytes=len(evil))
@@ -140,7 +141,8 @@ def test_package_with_unsafe_paths_is_refused(installer, release, signing_key, s
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         data = b"print('x')\n"
-        info = tarfile.TarInfo("../../escape.py"); info.size = len(data)
+        info = tarfile.TarInfo("../../escape.py")
+        info.size = len(data)
         tar.addfile(info, io.BytesIO(data))
     package = buf.getvalue()
     manifest = release.build_manifest("3.0", package, "")

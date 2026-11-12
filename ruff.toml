@@ -1,0 +1,12 @@
+# Python lint settings (CI job "lint": ruff check .). Bug-finding rules only, no style churn:
+#   E, W  pycodestyle errors and warnings     F  pyflakes (unused/undefined names)
+#   B     bugbear (likely bugs: closures over loop variables, zip without strict, ...)
+target-version = "py312"
+line-length = 110
+extend-exclude = [
+    "mqtt-bridge",        # David's standalone bridge prototype, not part of the deployed system
+    "test_bridge.py",     # duplicate upload of mqtt-bridge/test_bridge.py
+]
+
+[lint]
+select = ["E", "F", "W", "B"]

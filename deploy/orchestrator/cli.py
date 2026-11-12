@@ -29,10 +29,10 @@ def _table(headers: list, rows: list) -> None:
     rows = [["" if c is None else str(c) for c in r] for r in rows]
     widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h)
               for i, h in enumerate(headers)]
-    print("  ".join(h.ljust(w) for h, w in zip(headers, widths)))
+    print("  ".join(h.ljust(w) for h, w in zip(headers, widths, strict=True)))
     print("  ".join("-" * w for w in widths))
     for r in rows:
-        print("  ".join(c.ljust(w) for c, w in zip(r, widths)))
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths, strict=True)))
 
 
 def _time(ts) -> str:

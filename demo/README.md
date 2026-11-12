@@ -18,6 +18,8 @@ Each step says what is about to happen and which requirement it covers, does it,
 - **Its installed state.** `state.json`: current and previous version.
 - **Timing.** From the first command to the last device's reply.
 
+The script exits with status 1 if any check is NOT WORKING, so CI runs it as the end-to-end test (job `e2e`).
+
 `--detail` adds the full device log excerpts, every device's process change, raw MQTT messages and the orchestrator's decision log. Use it for Q&A or a recorded run; the default stays short enough for a 5 to 10 minute presentation.
 
 ## What it shows

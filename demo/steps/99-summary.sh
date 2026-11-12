@@ -22,6 +22,8 @@ passed=0 failed=0 skipped=0
 for c in "${CHECKS[@]}"; do
     case "${c%%|*}" in pass) passed=$((passed + 1)) ;; fail) failed=$((failed + 1)) ;; *) skipped=$((skipped + 1)) ;; esac
 done
+# The entry scripts exit with this, so CI fails when a check fails.
+((failed)) && DEMO_STATUS=1
 printf '   %sChecks:%s %s%d passed%s' "$BOLD" "$RESET" "$GREEN" "$passed" "$RESET"
 ((failed)) && printf ', %s%s%d NOT WORKING%s' "$BOLD" "$RED" "$failed" "$RESET"
 ((skipped)) && printf ', %s%d skipped%s' "$YELLOW" "$skipped" "$RESET"

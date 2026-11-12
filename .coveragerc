@@ -1,0 +1,14 @@
+# Coverage for the CI tests job (pytest --cov). source_dirs also counts files no test
+# imports, so untested modules show up as 0% instead of being left out of the total.
+[run]
+source_dirs =
+    deploy/orchestrator
+    deploy/device-agent
+    deploy/registries/software
+    tools
+
+[report]
+show_missing = true
+skip_empty = true
+# Raise this as tests are added; CI fails if total coverage drops below it.
+fail_under = 55

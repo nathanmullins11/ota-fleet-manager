@@ -80,3 +80,5 @@ build_images
 pause 1
 
 run_steps
+# 1 if any check was NOT WORKING (set by the summary step), for CI.
+exit "${DEMO_STATUS:-0}"

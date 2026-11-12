@@ -48,9 +48,11 @@ def main() -> int:
     manifest, signature, package = release.load_published(version, None, registry)
     public_key = release.load_public_key(release.PUBLIC_KEY.read_bytes())
     sha = json.loads(manifest)["sha256"]
-    print(f"   {BOLD}Downloaded {version}:{RESET} manifest, signature {DIM}{signature.strip()[:24].decode()}…{RESET}, "
+    sig_start = signature.strip()[:24].decode()
+    print(f"   {BOLD}Downloaded {version}:{RESET} manifest, signature {DIM}{sig_start}…{RESET}, "
           f"package ({len(package)} bytes)")
-    print(f"   {DIM}A device checks: signature → version → checksum from the command → package checksum{RESET}\n")
+    print(f"   {DIM}A device checks: signature → version → checksum from the command → "
+          f"package checksum{RESET}\n")
 
     # Tampered variants, built in memory.
     flipped = bytearray(package)
