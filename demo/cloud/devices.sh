@@ -8,6 +8,7 @@
 #   demo/cloud/devices.sh <vm-ip> --keep    # leave the devices running afterwards
 #   demo/cloud/devices.sh <vm-ip> --simulate  # fake the device replies
 #   demo/cloud/devices.sh <vm-ip> --devices N # number of simulated devices, 3 to 50 (default 5)
+#   demo/cloud/devices.sh <vm-ip> --detail    # full evidence: device logs, processes, raw messages
 #
 # The VM's security group must allow TCP 1883 (MQTT) from your IP, and TCP 8080
 # (software registry) for the signed-firmware step.
@@ -22,6 +23,7 @@ while (($#)); do
         --auto) export AUTO=1 ;;
         --keep) KEEP=1 ;;
         --simulate) export SIMULATE=1 ;;
+        --detail) export DETAIL=1 ;;
         -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
         *) VM_HOST=$arg ;;

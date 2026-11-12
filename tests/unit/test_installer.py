@@ -154,3 +154,22 @@ def test_corrupt_state_file_starts_from_factory(installer, store, factory_dir, s
     store.root.joinpath("state.json").write_text("{not json")
     again = installer.Store(store.root, signing_key.public_key())
     assert again.bootable(factory_dir).version == "1.0"
+
+
+def test_checks_are_reported_in_order_and_stop_at_the_first_failure(installer, signing_key, packages):
+    f = files(packages, "2.0")
+    lines = []
+    with pytest.raises(installer.VerificationError):
+        installer.verify_package(manifest=f["manifest.json"], signature=f["manifest.sig"],
+                                 package=f["firmware.tar.gz"], public_key=signing_key.public_key(),
+                                 expected_version="2.0", expected_sha256="0" * 64,
+                                 report=lines.append)
+    assert lines == ["check 1/4 signature: OK", "check 2/4 manifest is for 2.0: OK",
+                     "check 3/4 checksum matches the command: FAILED "
+                     "(checksum in manifest does not match the command)"]
+
+    lines.clear()
+    installer.verify_package(manifest=f["manifest.json"], signature=f["manifest.sig"],
+                             package=f["firmware.tar.gz"], public_key=signing_key.public_key(),
+                             expected_version="2.0", report=lines.append)
+    assert [line.split(": ")[-1] for line in lines] == ["OK"] * 4

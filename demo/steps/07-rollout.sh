@@ -111,6 +111,11 @@ echo
 ROLLOUT_RID=""
 ROLLOUT_TARGETS=()
 mark=$(listener_mark)
+t0=$(now_utc)
+declare -A PID_BEFORE=()
+for i in $(seq 1 "$DEVICE_COUNT"); do
+    PID_BEFORE[$(device_id "$i")]=$(firmware_pid "$(device_id "$i")")
+done
 if begin_rollout 2.0 u "update every online device to 2.0" --all; then
     ROLLOUT_RID=$RID
     mapfile -t ROLLOUT_TARGETS < <(commanded_devices update "$RID")
@@ -129,6 +134,35 @@ if begin_rollout 2.0 u "update every online device to 2.0" --all; then
             [[ -n "$reason" ]] && info "$d reported update_failed: $reason"
         fi
     done
+    echo
+
+    # Proof from inside the containers: each device's old firmware process was stopped and a
+    # new one runs from the 2.0 folder (not just a new version label in the heartbeat).
+    replaced=0 process_lines=()
+    for d in "${ROLLOUT_TARGETS[@]}"; do
+        now_pid=$(firmware_pid "$d")
+        now_version=$(firmware_running_version "$d")
+        [[ "$now_version" == 2.0 && -n "$now_pid" && "$now_pid" != "${PID_BEFORE[$d]:-}" ]] \
+            && replaced=$((replaced + 1))
+        process_lines+=("$d: pid ${PID_BEFORE[$d]:-?} (1.0) → pid ${now_pid:-none} (${now_version:-nothing running})")
+    done
+    first=${ROLLOUT_TARGETS[0]}
+    if ((replaced == ${#ROLLOUT_TARGETS[@]})); then
+        check_pass "Every device replaced its firmware process: ${process_lines[0]}"
+    else
+        check_fail "Only $replaced of ${#ROLLOUT_TARGETS[@]} devices run a new firmware 2.0 process" \
+                   "$(printf '%s; ' "${process_lines[@]}")"
+    fi
+    downloads=$(device_log "$first" "$t0" "^[0-9:]+ 2.0 downloaded" | wc -l)
+    checks_ok=$(device_log "$first" "$t0" "^[0-9:]+ 2.0 check [0-9]/4 .*: OK$" | wc -l)
+    proof "$first downloaded $downloads files (manifest, signature, package) and passed $checks_ok of 4 checks before installing"
+    reports=$(device_log "$first" "$t0" "Firmware 2.0 reports:" | head -n 1 | sed 's/^[0-9:]* Firmware 2.0 reports: //')
+    proof "firmware 2.0's own first output on $first: ${reports:-none} (1.0 never prints uptime_seconds)"
+    proof "$first's installed state: $(device_state_file "$first")"
+    timing=$(rollout_timing update "$RID") && proof "rollout $RID timing: $timing"
+    detail "Firmware processes on every device:" printf '%s\n' "${process_lines[@]}"
+    detail "$first's log for the update:" device_log "$first" "$t0" "2.0|Command received|Event sent|Firmware 1.0 stopped"
+    detail "$first's update_succeeded event exactly as sent (MQTT):" raw_message "$mark" "$first" events update_succeeded
     echo
     show_resources "during the rollout of 2.0 to ${#ROLLOUT_TARGETS[@]} devices"
     echo

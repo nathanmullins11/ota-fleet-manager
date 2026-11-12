@@ -41,16 +41,29 @@ forged_command() {
         "$1" "$2" "$pkg_url" "$pkg_url" "$pkg_url" "$3" "$(now_utc)"
 }
 
-# attack ROLLOUT_ID "description" PAYLOAD
+# attack ROLLOUT_ID TARGET_VERSION "description" PAYLOAD
 attack() {
-    local rid=$1 what=$2 payload=$3 m reason
+    local rid=$1 version=$2 what=$3 payload=$4 m reason since checks
     m=$(listener_mark)
+    since=$(now_utc)
     info "Forged: $what"
     mqtt_pub "ota/devices/device-002/commands" "$payload"
     if wait_until "$(event_timeout)" "waiting for device-002 to refuse it" \
             event_seen "$m" device-002 update_failed "$rid"; then
         reason=$(event_reason "$m" device-002 update_failed "$rid")
         check_pass "device-002 refused: $what (reason: ${reason:-none given})"
+        # The device's own record of which check stopped it, and what it downloaded.
+        checks=$(device_log device-002 "$since" "^[0-9:]+ $version check [0-9]/4" \
+                 | sed -E "s/^[0-9:]+ $version check ([0-9])\/4 ([^:]*): ([A-Z]+).*/\1 \2 \3/" \
+                 | sed -e 's/ OK$/ ✔/' -e 's/ FAILED$/ ✘/' | paste -sd'|' | sed 's/|/ · /g')
+        proof "device-002's checks: ${checks:-not logged}"
+        if device_log device-002 "$since" "^[0-9:]+ $version downloaded package" | grep -q .; then
+            proof "it downloaded the package before refusing"
+        else
+            proof "it stopped before downloading the package: only the manifest and signature were fetched"
+        fi
+        detail "device-002's log for this command:" \
+            device_log device-002 "$since" "rollout $rid|Downloading $version |^[0-9:]+ $version (check|downloaded)"
     elif event_seen "$m" device-002 update_succeeded "$rid"; then
         check_fail "device-002 INSTALLED a forged package: $what" "$(observed "$m" device-002)"
     else
@@ -60,18 +73,25 @@ attack() {
 }
 
 attack_mark=$(listener_mark)
-attack 900001 "genuine 2.0 package, but the command's sha256 does not match it" \
+pid_before=$(firmware_pid device-002)
+attack 900001 2.0 "genuine 2.0 package, but the command's sha256 does not match it" \
     "$(forged_command 900001 2.0 0000000000000000000000000000000000000000000000000000000000000000)"
-attack 900002 "genuine 2.0 package offered as an update to 2.1 (replay)" \
+echo
+attack 900002 2.1 "genuine 2.0 package offered as an update to 2.1 (replay)" \
     "$(forged_command 900002 2.1 "$sha_20")"
+echo
 
 # Only meaningful if device-002 actually processed the commands: a device that ignores
 # every command also "stays on 1.0".
 if lines_since "$attack_mark" | grep -q " ota/devices/device-002/events "; then
     m=$(listener_mark)
     sleep 6
-    if hb_is "$m" device-002 version 1.0; then
-        check_pass "device-002 still runs 1.0 after the attacks"
+    pid_after=$(firmware_pid device-002)
+    if hb_is "$m" device-002 version 1.0 && [[ -n "$pid_after" && "$pid_after" == "$pid_before" ]]; then
+        check_pass "device-002 still runs 1.0, and its firmware was never stopped (same process, pid $pid_after, before and after)"
+    elif hb_is "$m" device-002 version 1.0; then
+        check_fail "device-002 reports 1.0, but its firmware process changed during the attacks" \
+                   "pid before ${pid_before:-none}, after ${pid_after:-none}"
     else
         check_fail "device-002 does not report 1.0 after the attacks" "$(observed "$m" device-002)"
     fi

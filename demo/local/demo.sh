@@ -6,6 +6,7 @@
 #   demo/local/demo.sh --keep     # leave everything running afterwards
 #   demo/local/demo.sh --simulate # fake the device replies (before the device update logic exists)
 #   demo/local/demo.sh --devices N  # number of simulated devices, 3 to 50 (default 5)
+#   demo/local/demo.sh --detail   # full evidence: device logs, firmware processes, raw messages
 #
 # By default the demo checks what the devices really do (install, crash, roll back, reject
 # forged commands) and prints NOT WORKING in red for anything they do not do yet.
@@ -23,6 +24,7 @@ while (($#)); do
         --auto) export AUTO=1 ;;
         --keep) KEEP=1 ;;
         --simulate) export SIMULATE=1 ;;
+        --detail) export DETAIL=1 ;;
         -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
     esac

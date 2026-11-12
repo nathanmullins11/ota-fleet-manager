@@ -16,6 +16,9 @@ say "The operator rolls rollout $ROLLOUT_RID back. Each device gets a rollback c
 say "must restore the version it kept locally, report rollback_succeeded, and report 1.0 again."
 echo
 mark=$(listener_mark)
+t0=$(now_utc)
+declare -A PID_BEFORE=()
+for d in "${ROLLOUT_TARGETS[@]}"; do PID_BEFORE[$d]=$(firmware_pid "$d"); done
 if begin_rollback "$ROLLOUT_RID"; then
     commands_seen rollback "$ROLLOUT_RID" | head -n 1 | show_command
     for d in "${ROLLOUT_TARGETS[@]}"; do
@@ -32,12 +35,40 @@ if begin_rollback "$ROLLOUT_RID"; then
         fi
     done
     echo
+
+    # Proof: each device runs a new 1.0 process, restored from its kept copy (no download).
+    restored_local=0 process_lines=()
+    for d in "${ROLLOUT_TARGETS[@]}"; do
+        now_pid=$(firmware_pid "$d")
+        now_version=$(firmware_running_version "$d")
+        if [[ "$now_version" == 1.0 && "$now_pid" != "${PID_BEFORE[$d]:-}" ]] \
+                && device_log "$d" "$t0" "Using the kept copy of 1.0" | grep -q . \
+                && ! device_log "$d" "$t0" "Downloading 1.0" | grep -q .; then
+            restored_local=$((restored_local + 1))
+        fi
+        process_lines+=("$d: pid ${PID_BEFORE[$d]:-?} (2.0) → pid ${now_pid:-none} (${now_version:-nothing running})")
+    done
+    first=${ROLLOUT_TARGETS[0]}
+    if ((restored_local == ${#ROLLOUT_TARGETS[@]})); then
+        check_pass "Every device restored 1.0 from its kept copy, without downloading: ${process_lines[0]}"
+    else
+        check_fail "Only $restored_local of ${#ROLLOUT_TARGETS[@]} devices restored 1.0 from their kept copy" \
+                   "$(printf '%s; ' "${process_lines[@]}")"
+    fi
+    checks_ok=$(device_log "$first" "$t0" "^[0-9:]+ 1.0 check [0-9]/4 .*: OK$" | wc -l)
+    proof "$first re-verified its kept copy of 1.0 against the command ($checks_ok of 4 checks OK) before running it"
+    proof "$first's installed state: $(device_state_file "$first")"
+    timing=$(rollout_timing rollback "$ROLLOUT_RID") && proof "rollback timing: $timing"
+    detail "Firmware processes on every device:" printf '%s\n' "${process_lines[@]}"
+    detail "$first's log for the rollback:" device_log "$first" "$t0" "1.0|Command received|Event sent|Firmware 2.0 stopped"
+    echo
     if [[ "$CP_LOCAL" == 1 ]]; then
         if ! wait_until $(( ${COMMAND_TIMEOUT_SECONDS:-120} + 15 )) \
                 "waiting for the orchestrator to finish the rollback" \
                 rollout_state_is "$ROLLOUT_RID" rolled_back; then
             check_fail "rollback of rollout $ROLLOUT_RID did not finish" "state: $(rollout_state "$ROLLOUT_RID")"
         fi
+        run_note "python cli.py rollout status $ROLLOUT_RID"
         cli rollout status "$ROLLOUT_RID" | indent
         restored=$(cp_psql -Atc "SELECT count(*) FROM rollout_devices WHERE rollout_id = $ROLLOUT_RID AND state = 'rolled_back';")
         if [[ "$restored" == "${#ROLLOUT_TARGETS[@]}" ]]; then

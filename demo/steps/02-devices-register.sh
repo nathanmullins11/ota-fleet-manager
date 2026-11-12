@@ -6,6 +6,7 @@ step "Devices connect and register with their version and heartbeat" \
 say "Starting $DEVICE_COUNT simulated devices on this machine (one container each), firmware 1.0,"
 say "heartbeat every 5 seconds, broker at $MQTT_HOST:$MQTT_PORT."
 echo
+boot_time=$(now_utc)
 for i in $(seq 1 "$DEVICE_COUNT"); do
     start_device "$i"
 done
@@ -24,6 +25,24 @@ for i in $(seq 1 "$DEVICE_COUNT"); do
     d=$(device_id "$i")
     expect 15 "$d's heartbeat reports firmware 1.0" 0 "$d" hb_is 0 "$d" version 1.0 || true
 done
+echo
+
+# Proof from inside the containers: the heartbeat's "1.0" is a real firmware process.
+running=0 missing=()
+for i in $(seq 1 "$DEVICE_COUNT"); do
+    d=$(device_id "$i")
+    if [[ "$(firmware_running_version "$d")" == 1.0 ]]; then running=$((running + 1)); else missing+=("$d"); fi
+done
+if ((running == DEVICE_COUNT)); then
+    check_pass "Every device runs firmware 1.0 as a real process (device-001: $(describe_process device-001))"
+else
+    check_fail "Only $running of $DEVICE_COUNT devices run a firmware 1.0 process" "none in: ${missing[*]}"
+fi
+proof "device-001 verified its factory firmware before running it: $(device_log device-001 "$boot_time" "check [0-9]/4" \
+    | grep -c ": OK$") of 4 checks OK"
+detail "device-001's log at start-up:" device_log device-001 "$boot_time" "factory|check|Firmware|firmware:|Starting"
+detail "A heartbeat exactly as device-001 sent it (MQTT, ota/devices/device-001/heartbeat):" \
+    raw_message 0 device-001 heartbeat
 echo
 
 if [[ "$CP_LOCAL" == 1 ]]; then

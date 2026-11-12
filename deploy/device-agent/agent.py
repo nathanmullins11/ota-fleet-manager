@@ -92,7 +92,8 @@ class Device:
         return self.store.current
 
     def boot(self) -> None:
-        installed = self.store.bootable(self.cfg.factory_dir)
+        installed = self.store.bootable(self.cfg.factory_dir,
+                                        report=lambda line: log.info("At start-up: %s", line))
         self.runner.start(installed.version, installed.app_dir, installed.entrypoint)
         problem = self.runner.wait_until_started(self.cfg.start_timeout_seconds)
         if problem:
@@ -136,14 +137,19 @@ class Device:
     def _obtain(self, cmd: Command) -> Installed:
         """A verified, unpacked copy of the target: the kept local copy if it matches the
         command's checksum (normal for a rollback), otherwise a fresh download."""
-        if self.store.has_valid(cmd.target_version, cmd.sha256):
-            log.info("Using the kept copy of %s", cmd.target_version)
-            return self.store.installed(cmd.target_version)
-        log.info("Downloading %s from %s", cmd.target_version, cmd.download_url)
+        version = cmd.target_version
+
+        def report(line: str) -> None:
+            log.info("%s %s", version, line)
+
+        if self.store.has_valid(version, cmd.sha256, report):
+            log.info("Using the kept copy of %s (verified; no download needed)", version)
+            return self.store.installed(version)
+        log.info("Downloading %s from %s", version, cmd.download_url)
         download = download_verified(cmd.manifest_url, cmd.signature_url, cmd.download_url,
-                                     self.store.public_key, cmd.target_version, cmd.sha256,
-                                     self.cfg.download_timeout_seconds)
-        return self.store.add(cmd.target_version, download)
+                                     self.store.public_key, version, cmd.sha256,
+                                     self.cfg.download_timeout_seconds, report)
+        return self.store.add(version, download)
 
     def _switch_to(self, new: Installed) -> Optional[str]:
         """Stop the running firmware and start `new`. If it does not start properly, go back
@@ -154,6 +160,7 @@ class Device:
         problem = self.runner.wait_until_started(self.cfg.start_timeout_seconds)
         if problem is None:
             self.store.set_current(new.version)
+            log.info("Firmware %s reports: %s", new.version, self.runner.latest_line)
             return None
         self.runner.stop()
         self.runner.start(old.version, old.app_dir, old.entrypoint)

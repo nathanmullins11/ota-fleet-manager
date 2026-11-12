@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -58,41 +58,73 @@ def load_public_key(path: Path) -> Ed25519PublicKey:
     return key
 
 
+Report = Optional[Callable[[str], None]]
+
+
+def _check(report: Report, number: int, name: str, test: Callable[[], None]) -> None:
+    """Run one numbered check; tell `report` how it went (for the device log)."""
+    try:
+        test()
+    except VerificationError as exc:
+        if report:
+            report(f"check {number}/4 {name}: FAILED ({exc})")
+        raise
+    if report:
+        report(f"check {number}/4 {name}: OK")
+
+
 def verify_manifest(manifest: bytes, signature: bytes, public_key: Ed25519PublicKey,
-                    expected_version: str, expected_sha256: Optional[str] = None) -> dict:
+                    expected_version: str, expected_sha256: Optional[str] = None,
+                    report: Report = None) -> dict:
     """Checks 1 to 3: signature, version, checksum against the command."""
-    try:
-        public_key.verify(base64.b64decode(signature.strip(), validate=True), manifest)
-    except (InvalidSignature, ValueError) as exc:
-        raise VerificationError("signature verification failed") from exc
-    try:
-        fields = json.loads(manifest)
-    except ValueError as exc:
-        raise VerificationError("manifest is not valid JSON") from exc
-    if not isinstance(fields, dict) or not isinstance(fields.get("sha256"), str):
-        raise VerificationError("manifest is missing required fields")
-    if fields.get("version") != expected_version:
-        raise VerificationError(
-            f"manifest is for version {fields.get('version')!r}, expected {expected_version!r}")
-    if expected_sha256 is not None and fields["sha256"] != expected_sha256:
-        raise VerificationError("checksum in manifest does not match the command")
+    def signature_valid():
+        try:
+            public_key.verify(base64.b64decode(signature.strip(), validate=True), manifest)
+        except (InvalidSignature, ValueError) as exc:
+            raise VerificationError("signature verification failed") from exc
+
+    fields: dict = {}
+
+    def right_version():
+        try:
+            fields.update(json.loads(manifest))
+        except (ValueError, TypeError) as exc:
+            raise VerificationError("manifest is not valid JSON") from exc
+        if not isinstance(fields.get("sha256"), str):
+            raise VerificationError("manifest is missing required fields")
+        if fields.get("version") != expected_version:
+            raise VerificationError(
+                f"manifest is for version {fields.get('version')!r}, expected {expected_version!r}")
+
+    def matches_command():
+        if expected_sha256 is not None and fields["sha256"] != expected_sha256:
+            raise VerificationError("checksum in manifest does not match the command")
+
+    _check(report, 1, "signature", signature_valid)
+    _check(report, 2, f"manifest is for {expected_version}", right_version)
+    _check(report, 3, "checksum matches the command" if expected_sha256 is not None
+           else "checksum (no command to compare)", matches_command)
     return fields
 
 
-def check_package(fields: dict, package: bytes) -> None:
+def check_package(fields: dict, package: bytes, report: Report = None) -> None:
     """Check 4: the package's size and SHA-256 match the (already verified) manifest."""
-    if fields.get("size_bytes") != len(package):
-        raise VerificationError("package size does not match manifest")
-    if hashlib.sha256(package).hexdigest() != fields["sha256"]:
-        raise VerificationError("checksum mismatch")
+    def matches_manifest():
+        if fields.get("size_bytes") != len(package):
+            raise VerificationError("package size does not match manifest")
+        if hashlib.sha256(package).hexdigest() != fields["sha256"]:
+            raise VerificationError("checksum mismatch")
+
+    _check(report, 4, "package size and checksum", matches_manifest)
 
 
 def verify_package(*, manifest: bytes, signature: bytes, package: bytes,
                    public_key: Ed25519PublicKey, expected_version: str,
-                   expected_sha256: Optional[str] = None) -> dict:
+                   expected_sha256: Optional[str] = None, report: Report = None) -> dict:
     """All four checks in order. Returns the manifest fields or raises VerificationError."""
-    fields = verify_manifest(manifest, signature, public_key, expected_version, expected_sha256)
-    check_package(fields, package)
+    fields = verify_manifest(manifest, signature, public_key, expected_version, expected_sha256,
+                             report)
+    check_package(fields, package, report)
     return fields
 
 
@@ -121,13 +153,20 @@ class Download:
 
 def download_verified(manifest_url: str, signature_url: str, package_url: str,
                       public_key: Ed25519PublicKey, version: str, sha256: str,
-                      timeout: float) -> Download:
-    """Fetch and verify a package. The manifest is checked before the package is fetched."""
-    manifest = fetch(manifest_url, timeout)
-    signature = fetch(signature_url, timeout)
-    fields = verify_manifest(manifest, signature, public_key, version, sha256)
-    package = fetch(package_url, timeout)
-    check_package(fields, package)
+                      timeout: float, report: Report = None) -> Download:
+    """Fetch and verify a package. The manifest is checked before the package is fetched,
+    so a forged or mismatched command never causes the package itself to be downloaded."""
+    def get(url: str, what: str) -> bytes:
+        data = fetch(url, timeout)
+        if report:
+            report(f"downloaded {what} ({len(data)} bytes) from {url}")
+        return data
+
+    manifest = get(manifest_url, "manifest")
+    signature = get(signature_url, "signature")
+    fields = verify_manifest(manifest, signature, public_key, version, sha256, report)
+    package = get(package_url, "package")
+    check_package(fields, package, report)
     return Download(manifest, signature, package)
 
 
@@ -190,7 +229,8 @@ class Store:
 
     # ---- packages
 
-    def verify_local(self, version: str, expected_sha256: Optional[str] = None) -> dict:
+    def verify_local(self, version: str, expected_sha256: Optional[str] = None,
+                     report: Report = None) -> dict:
         """Re-verify a stored package (all four checks). Raises VerificationError or OSError."""
         folder = self.versions_dir / version
         return verify_package(
@@ -198,22 +238,23 @@ class Store:
             signature=(folder / SIGNATURE_FILE).read_bytes(),
             package=(folder / PACKAGE_FILE).read_bytes(),
             public_key=self.public_key, expected_version=version,
-            expected_sha256=expected_sha256)
+            expected_sha256=expected_sha256, report=report)
 
-    def has_valid(self, version: str, expected_sha256: Optional[str] = None) -> bool:
+    def has_valid(self, version: str, expected_sha256: Optional[str] = None,
+                  report: Report = None) -> bool:
         try:
-            self.verify_local(version, expected_sha256)
+            self.verify_local(version, expected_sha256, report)
             return (self.versions_dir / version / APP_DIR).is_dir()
         except (VerificationError, OSError) as exc:
             if (self.versions_dir / version).exists():
                 log.warning("Stored copy of %s is not usable: %s", version, exc)
             return False
 
-    def add(self, version: str, download: Download) -> Installed:
+    def add(self, version: str, download: Download, report: Report = None) -> Installed:
         """Store and unpack a verified package. Replaces any earlier copy of that version."""
         fields = verify_package(manifest=download.manifest, signature=download.signature,
                                 package=download.package, public_key=self.public_key,
-                                expected_version=version)
+                                expected_version=version, report=report)
         entrypoint = fields.get("entrypoint", "main.py")
         if not isinstance(entrypoint, str) or "/" in entrypoint or entrypoint in ("", ".", ".."):
             raise InstallError(f"manifest entrypoint {entrypoint!r} is not a file name")
@@ -249,21 +290,21 @@ class Store:
         return Installed(version, self.versions_dir / version / APP_DIR,
                          manifest.get("entrypoint", "main.py"))
 
-    def install_from_folder(self, folder: Path) -> Installed:
+    def install_from_folder(self, folder: Path, report: Report = None) -> Installed:
         """Install a package from a folder holding the three published files (factory image)."""
         folder = Path(folder)
         download = Download((folder / MANIFEST_FILE).read_bytes(),
                             (folder / SIGNATURE_FILE).read_bytes(),
                             (folder / PACKAGE_FILE).read_bytes())
-        return self.add(folder.name, download)
+        return self.add(folder.name, download, report)
 
-    def bootable(self, factory_dir: Path) -> Installed:
+    def bootable(self, factory_dir: Path, report: Report = None) -> Installed:
         """The version to run at start-up: current, else previous, else the factory package.
 
         Each candidate is verified on disk first, so a damaged or edited copy is never run.
         """
         for version in (self.current, self.previous):
-            if version and self.has_valid(version):
+            if version and self.has_valid(version, report=report):
                 if version != self.current:
                     log.warning("Current version %s is not usable; falling back to %s",
                                 self.current, version)
@@ -274,6 +315,6 @@ class Store:
         if not factory:
             raise InstallError(f"no factory package in {factory_dir}")
         log.info("Installing factory firmware %s", factory[-1].name)
-        installed = self.install_from_folder(factory[-1])
+        installed = self.install_from_folder(factory[-1], report)
         self.set_current(installed.version)
         return installed

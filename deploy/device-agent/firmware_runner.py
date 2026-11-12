@@ -64,6 +64,7 @@ class FirmwareRunner:
         # Per-run facts used by wait_until_started().
         self._status_run = 0          # run that printed the latest status line
         self._latest_status: Optional[str] = None
+        self._latest_line = ""         # the latest status line as printed, for the log
         self._exited_run = 0
         self._exit_code: Optional[int] = None
         # Accumulated for the next heartbeat.
@@ -76,6 +77,10 @@ class FirmwareRunner:
     @property
     def version(self) -> Optional[str]:
         return self._version
+
+    @property
+    def latest_line(self) -> str:
+        return self._latest_line
 
     def start(self, version: str, app_dir: Path, entrypoint: str = "main.py",
               trial: bool = False) -> None:
@@ -177,6 +182,7 @@ class FirmwareRunner:
                 if run != self._run:
                     continue
                 self._latest_status = status
+                self._latest_line = line.strip()[:300]
                 self._status_run = run
                 self._errors += errors
                 if self._worst is None or STATUS_RANK[status] > STATUS_RANK[self._worst]:
