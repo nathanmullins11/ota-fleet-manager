@@ -42,6 +42,9 @@ PRIVATE_KEY = Path(os.environ.get("RELEASE_PRIVATE_KEY", REPO / "keys" / "releas
 PUBLIC_KEY = REPO / "keys" / "release-public.pem"
 # Copies of the public key that ship with the devices.
 PUBLIC_KEY_COPIES = [REPO / "deploy" / "device-agent" / "release-public.pem"]
+# The firmware devices ship with: a copy of its published package goes into the device image.
+FACTORY_VERSION = "1.0"
+FACTORY_DIR = REPO / "deploy" / "device-agent" / "factory"
 
 PACKAGE_FILE = "firmware.tar.gz"
 MANIFEST_FILE = "manifest.json"
@@ -176,6 +179,12 @@ def build(version: str, src: Path, out_root: Path, key: Ed25519PrivateKey) -> Pa
     return out
 
 
+def copy_factory_package(src: Path, dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in (PACKAGE_FILE, MANIFEST_FILE, SIGNATURE_FILE):
+        shutil.copyfile(src / name, dest / name)
+
+
 # --------------------------------------------------------------------------- verify
 
 def verify_package(*, manifest: bytes, signature: bytes, package: bytes,
@@ -269,6 +278,10 @@ def _cmd_build(args) -> int:
             return 1
         sha = json.loads((out / MANIFEST_FILE).read_bytes())["sha256"]
         print(f"{version}: {out.relative_to(REPO)}  sha256={sha}")
+        if version == FACTORY_VERSION:
+            copy_factory_package(out, FACTORY_DIR / version)
+            print(f"{version}: copied to {(FACTORY_DIR / version).relative_to(REPO)} "
+                  "(factory firmware in the device image)")
     return 0
 
 

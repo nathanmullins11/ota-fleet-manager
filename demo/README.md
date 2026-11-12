@@ -9,7 +9,7 @@ Scripted demos of the OTA Update Fleet Manager in two setups:
 
 Each step says what is about to happen and which requirement it covers, does it, and shows the result. By default the script waits for **Enter** before each step so you can talk; `--auto` runs straight through (about 4 minutes).
 
-**Real by default, `--simulate` for a clean run.** By default the demo checks what the devices *really* do: install firmware, report crashes, roll back, refuse forged commands. Anything they do not do is printed in red as **✘ NOT WORKING**, with what was seen instead, and the demo carries on; the summary lists every check. Until the device update logic (Iteration 2, David) is done, the device-side checks are expected to be red. `--simulate` keeps the earlier behaviour: the demo fakes the device replies and the crash heartbeat (marked SIMULATED), for presenting before that work lands.
+**Real by default, `--simulate` for a clean run.** By default the demo checks what the devices *really* do: install firmware, report crashes, roll back, refuse forged commands. Anything they do not do is printed in red as **✘ NOT WORKING**, with what was seen instead, and the demo carries on; the summary lists every check. With the device update logic in place, a local run passes every check (47 with 5 devices). `--simulate` keeps the earlier behaviour: the demo fakes the device replies and the crash heartbeat (marked SIMULATED), for presenting before that work lands.
 
 ## What it shows
 

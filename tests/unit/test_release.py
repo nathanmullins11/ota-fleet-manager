@@ -168,3 +168,12 @@ def test_committed_packages_match_source(release):
 def test_device_agent_has_the_release_public_key(release):
     for copy in release.PUBLIC_KEY_COPIES:
         assert copy.read_bytes() == release.PUBLIC_KEY.read_bytes(), copy
+
+
+def test_device_image_has_the_published_factory_package(release):
+    """deploy/device-agent/factory/1.0 must be the registry's 1.0 (release.py build 1.0 copies it)."""
+    factory = release.FACTORY_DIR / release.FACTORY_VERSION
+    published = release.PACKAGES_DIR / release.FACTORY_VERSION
+    for name in (release.PACKAGE_FILE, release.MANIFEST_FILE, release.SIGNATURE_FILE):
+        assert (factory / name).read_bytes() == (published / name).read_bytes(), name
+    assert [p.name for p in release.FACTORY_DIR.iterdir()] == [release.FACTORY_VERSION]

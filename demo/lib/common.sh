@@ -204,7 +204,7 @@ start_device() {
     docker run -d --name "$(device_name "$i")" --label "$DEMO_LABEL" "${HOST_GATEWAY[@]}" \
         -e DEVICE_ID="$(device_id "$i")" \
         -e MQTT_HOST="$MQTT_HOST" -e MQTT_PORT="$MQTT_PORT" \
-        -e FIRMWARE_VERSION=1.0 -e HEARTBEAT_INTERVAL_SECONDS=5 \
+        -e HEARTBEAT_INTERVAL_SECONDS=5 \
         "$DEVICE_IMAGE" >/dev/null
 }
 
