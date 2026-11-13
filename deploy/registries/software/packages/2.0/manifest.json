@@ -3,7 +3,8 @@
   "filename": "firmware.tar.gz",
   "notes": "healthy update",
   "schema_version": 1,
-  "sha256": "a320083e937e3ed6f4622d154dbf79405729345e8bc747ae9b4a0dd98b358aa4",
-  "size_bytes": 757,
+  "sha256": "ea1d887c4586f2c0a8eb715b50281940fe50184a67f2d534c825b77190cd738a",
+  "size_bytes": 1598,
+  "state_schema": 2,
   "version": "2.0"
 }

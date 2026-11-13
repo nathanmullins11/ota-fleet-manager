@@ -118,7 +118,7 @@ class Device:
         self.busy.set()
         try:
             installed = self._obtain(cmd)
-            problem = self._switch_to(installed)
+            problem = self._switch_to(installed, rollback=(kind == "rollback"))
         except (VerificationError, InstallError) as exc:
             problem = str(exc)
         except Exception as exc:        # never leave a command unanswered
@@ -151,11 +151,31 @@ class Device:
                                      self.cfg.download_timeout_seconds, report)
         return self.store.add(version, download)
 
-    def _switch_to(self, new: Installed) -> Optional[str]:
-        """Stop the running firmware and start `new`. If it does not start properly, go back
-        to the old version. Returns None on success, otherwise the reason."""
+    def _switch_to(self, new: Installed, rollback: bool = False) -> Optional[str]:
+        """Stop the running firmware and start `new`, applying the state policy
+        (firmware/README.md, "State"). If `new` does not start properly, go back to the old
+        version and its state. Returns None on success, otherwise the reason."""
         old = self.store.installed(self.version)
         self.runner.stop()
+        self.store.snapshot_state(old.version)
+        log.info("Saved a snapshot of the device state as %s left it (state schema %s)",
+                 old.version, old.state_schema)
+
+        # Older firmware must never read state written by newer firmware: a rollback, or any
+        # move to an older state schema, restores the state from before that version was left.
+        # Firmware that declares no state schema keeps no state, so it is never a downgrade.
+        downgrade = (new.state_schema is not None and old.state_schema is not None
+                     and new.state_schema < old.state_schema)
+        if rollback or downgrade:
+            if self.store.has_snapshot(new.version):
+                self.store.restore_state(new.version)
+                log.info("Restored the state snapshot of %s (state schema %s)",
+                         new.version, new.state_schema)
+            elif downgrade:
+                self.runner.start(old.version, old.app_dir, old.entrypoint)
+                return (f"no state snapshot for {new.version}, which cannot read state schema "
+                        f"{old.state_schema}; still running {old.version}")
+
         self.runner.start(new.version, new.app_dir, new.entrypoint, trial=True)
         problem = self.runner.wait_until_started(self.cfg.start_timeout_seconds)
         if problem is None:
@@ -163,6 +183,8 @@ class Device:
             log.info("Firmware %s reports: %s", new.version, self.runner.latest_line)
             return None
         self.runner.stop()
+        self.store.restore_state(old.version)     # new firmware may have converted it
+        log.info("Restored the state snapshot of %s after the failed start", old.version)
         self.runner.start(old.version, old.app_dir, old.entrypoint)
         return f"{problem}; still running {old.version}"
 
@@ -224,7 +246,7 @@ def main() -> None:
     except (OSError, ValueError) as exc:
         raise SystemExit(f"Cannot load the release public key: {exc}") from None
     store = Store(cfg.firmware_dir, public_key)
-    runner = FirmwareRunner(cfg.restart_delay_seconds)
+    runner = FirmwareRunner(cfg.restart_delay_seconds, state_dir=store.state_dir)
     commands: "queue.Queue[Command]" = queue.Queue()
     client: Optional[mqtt.Client] = None
 

@@ -82,8 +82,9 @@ def device(agent, agent_config, installer, firmware_runner, signing_key, package
         factory_dir=factory.parent, public_key_path=tmp_path / "unused.pem",
         start_timeout_seconds=3, restart_delay_seconds=0.2, download_timeout_seconds=3)
     events = []
-    dev = agent.Device(cfg, installer.Store(cfg.firmware_dir, signing_key.public_key()),
-                       firmware_runner.FirmwareRunner(cfg.restart_delay_seconds),
+    store = installer.Store(cfg.firmware_dir, signing_key.public_key())
+    dev = agent.Device(cfg, store,
+                       firmware_runner.FirmwareRunner(cfg.restart_delay_seconds, store.state_dir),
                        lambda *e: events.append(e))
     dev.events = events
     dev.boot()
@@ -194,3 +195,51 @@ def test_faulty_update_crashes_are_reported_then_rolled_back(device, agent_comma
 def test_heartbeat_says_updating_while_busy(device):
     device.busy.set()
     assert device.heartbeat()["status"] == "updating"
+
+
+
+# --------------------------------------------------------------------------- state policy
+
+def device_config(device) -> dict:
+    return json.loads((device.store.state_dir / "config.json").read_text())
+
+
+def test_update_converts_state_and_rollback_restores_it(device, agent_commands, registry):
+    assert device_config(device)["state_schema"] == 1
+    boots_before = device_config(device)["boot_count"]
+    device.handle(command(agent_commands, registry, "update", "2.0"))
+    assert names(device)[-1] == ("update_succeeded", None)
+    assert device_config(device)["state_schema"] == 2      # 2.0 converted it
+
+    device.handle(command(agent_commands, registry, "rollback", "1.0"))
+    assert names(device)[-1] == ("rollback_succeeded", None)
+    restored = device_config(device)
+    assert restored["state_schema"] == 1 and "settings" not in restored
+    assert restored["boot_count"] == boots_before + 1      # the pre-update state, booted once more
+    time.sleep(0.3)
+    hb = device.heartbeat()
+    assert (hb["version"], hb["status"], hb["crash_count"]) == ("1.0", "healthy", 0)
+
+
+def test_rollback_without_a_snapshot_is_refused(device, agent_commands, registry):
+    import shutil
+
+    device.handle(command(agent_commands, registry, "update", "2.0"))
+    shutil.rmtree(device.store.versions_dir / "1.0" / "state-snapshot")
+    device.handle(command(agent_commands, registry, "rollback", "1.0"))
+    event, reason = names(device)[-1]
+    assert event == "rollback_failed"
+    assert reason == ("no state snapshot for 1.0, which cannot read state schema 2; "
+                      "still running 2.0")
+    assert device.runner.version == "2.0" and device_config(device)["state_schema"] == 2
+
+
+def test_failed_start_puts_the_old_state_back(device, agent_commands, registry):
+    """9.2 converts the state to schema 9 and dies; 1.0 must get its own state back."""
+    device.handle(command(agent_commands, registry, "update", "9.2"))
+    event, reason = names(device)[-1]
+    assert event == "update_failed" and reason.endswith("still running 1.0")
+    assert device_config(device)["state_schema"] == 1
+    time.sleep(0.3)
+    hb = device.heartbeat()
+    assert (hb["status"], hb["crash_count"]) == ("healthy", 0)

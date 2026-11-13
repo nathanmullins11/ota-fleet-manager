@@ -50,8 +50,10 @@ def parse_status_line(line: str) -> Optional[tuple[str, int]]:
 
 
 class FirmwareRunner:
-    def __init__(self, restart_delay_seconds: float = 2.0):
+    def __init__(self, restart_delay_seconds: float = 2.0, state_dir: Optional[Path] = None):
         self.restart_delay = restart_delay_seconds
+        # Given to the firmware as FIRMWARE_STATE_DIR: where it keeps its persistent state.
+        self.state_dir = state_dir
         self._cond = threading.Condition()
         self._proc: Optional[subprocess.Popen] = None
         self._run = 0                 # increments on every process start
@@ -155,7 +157,7 @@ class FirmwareRunner:
             proc = subprocess.Popen(
                 [sys.executable, self._entrypoint], cwd=self._app_dir,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"})
+                env=self._env())
         except OSError as exc:
             log.error("Could not start firmware %s: %s", self._version, exc)
             self._proc = None
@@ -170,6 +172,13 @@ class FirmwareRunner:
         logger.start()
         threading.Thread(target=self._watch, args=(proc, run, reader, stderr_tail),
                          daemon=True).start()
+
+    def _env(self) -> dict:
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        if self.state_dir is not None:
+            Path(self.state_dir).mkdir(parents=True, exist_ok=True)
+            env["FIRMWARE_STATE_DIR"] = str(self.state_dir)
+        return env
 
     def _read_stdout(self, proc: subprocess.Popen, run: int) -> None:
         for line in proc.stdout:

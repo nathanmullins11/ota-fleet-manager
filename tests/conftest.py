@@ -137,7 +137,8 @@ def signing_key(release):
 @pytest.fixture(scope="session")
 def packages(release, signing_key, tmp_path_factory):
     """firmware/1.0, 2.0 and 2.1 built and signed with signing_key, plus 9.0, which exits at
-    once with code 3 (firmware that does not start). Returns the packages folder."""
+    once with code 3 (firmware that does not start), and 9.2, which converts the device state
+    to schema 9 and then exits. Returns the packages folder."""
     out = tmp_path_factory.mktemp("packages")
     for version in ("1.0", "2.0", "2.1"):
         release.build(version, release.FIRMWARE_DIR / version, out, signing_key)
@@ -145,6 +146,15 @@ def packages(release, signing_key, tmp_path_factory):
     broken.mkdir()
     (broken / "main.py").write_text('VERSION = "9.0"\nimport sys\nsys.exit(3)\n')
     release.build("9.0", broken, out, signing_key)
+    # 9.2 rewrites the device state in its own schema, then exits before reporting a status:
+    # the agent must put the old state back, or the old firmware could not read it.
+    converts = tmp_path_factory.mktemp("src") / "9.2"
+    converts.mkdir()
+    (converts / "main.py").write_text(
+        'VERSION = "9.2"\nSTATE_SCHEMA = 9\nimport json, os, pathlib, sys\n'
+        'd = pathlib.Path(os.environ["FIRMWARE_STATE_DIR"])\n'
+        '(d / "config.json").write_text(json.dumps({"state_schema": 9}))\nsys.exit(4)\n')
+    release.build("9.2", converts, out, signing_key)
     return out
 
 

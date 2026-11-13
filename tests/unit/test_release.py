@@ -177,3 +177,21 @@ def test_device_image_has_the_published_factory_package(release):
     for name in (release.PACKAGE_FILE, release.MANIFEST_FILE, release.SIGNATURE_FILE):
         assert (factory / name).read_bytes() == (published / name).read_bytes(), name
     assert [p.name for p in release.FACTORY_DIR.iterdir()] == [release.FACTORY_VERSION]
+
+
+
+def test_manifest_declares_the_state_schema_of_the_source(release, src, key, tmp_path):
+    assert "state_schema" not in json.loads(
+        release.build("2.0", src, tmp_path / "a", key).joinpath("manifest.json").read_text())
+    (src / "main.py").write_text('VERSION = "2.0"\nSTATE_SCHEMA = 3\n')
+    manifest = json.loads(release.build("2.0", src, tmp_path / "b", key)
+                          .joinpath("manifest.json").read_text())
+    assert manifest["state_schema"] == 3
+
+
+def test_committed_manifests_carry_the_firmware_state_schema(release):
+    expected = {"1.0": 1, "2.0": 2, "2.1": 2}
+    for version, schema in expected.items():
+        manifest = json.loads((release.PACKAGES_DIR / version / release.MANIFEST_FILE).read_bytes())
+        assert manifest["state_schema"] == schema == release.source_state_schema(
+            release.FIRMWARE_DIR / version), version

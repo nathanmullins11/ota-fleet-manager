@@ -196,7 +196,7 @@ The registry's `/versions` endpoint returns relative URLs (`/packages/2.0`, `/pa
 }
 ```
 
-Fields are the same as the update command. `target_version` here is the version to **go back to**. The agent normally reinstalls the copy of the previous version it kept locally and verifies it against `sha256`. `download_url` is a fallback if the local copy is missing or fails verification.
+Fields are the same as the update command. `target_version` here is the version to **go back to**. The agent normally reinstalls the copy of the previous version it kept locally and verifies it against `sha256`. `download_url` is a fallback if the local copy is missing or fails verification. The agent also restores the device state snapshot it saved before the update, so the older firmware reads the state it wrote (`firmware/README.md`, "State and rollback"). A rollback to firmware with an older state schema and no snapshot is answered with `rollback_failed`.
 
 **Agent behavior rules:**
 - **Idempotent:** if `target_version` is already the running version, do nothing except answer `update_succeeded` / `rollback_succeeded` with the reason `already running <version>`. This makes repeated or replayed commands harmless.

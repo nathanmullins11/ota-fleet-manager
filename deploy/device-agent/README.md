@@ -66,6 +66,8 @@ The firmware's own settings (`FIRMWARE_TICK_SECONDS`, `FIRMWARE_FAULT_*`, see `f
 3. Download the manifest and signature, check the signature, the version, and the checksum against the command; only then download the package and check its size and checksum (mqtt-topics-and-messages.md 4.3). The first failed check ends the update with `update_failed` and that check as the reason.
 4. Unpack, stop the old firmware (not a crash), start the new one. If it reports a healthy or degraded status within 5 s, the new version becomes current: `update_succeeded`. If it exits or stays silent, the old version is restarted: `update_failed` ("firmware 9.0 exited with code 3 before reporting its status; still running 1.0"). Such a failed start is not counted as a crash.
 
+**Firmware state.** The firmware keeps its persistent data in `~/firmware/state/` (passed as `FIRMWARE_STATE_DIR`). Before every switch the agent snapshots that folder for the version it leaves; a rollback, or a move to firmware with an older `state_schema`, restores the target's snapshot first, and so does a failed start. The full policy is in `firmware/README.md`, "State and rollback".
+
 **Rollback command.** The same, with `rollback_*` events. The previous version's package is kept on the device, so it is reinstalled from there after verifying it against the command's checksum; it is downloaded only if the copy is missing or fails verification.
 
 **Commands arriving during an update** wait in a queue and run in order afterwards. A malformed command that still names a rollout and version is answered with a failure event ("invalid command: ..."); one that does not is only logged.

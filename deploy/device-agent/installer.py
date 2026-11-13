@@ -4,7 +4,14 @@ Layout under the firmware folder:
 
   versions/<version>/manifest.json, manifest.sig, firmware.tar.gz   as downloaded (signed)
   versions/<version>/app/                                           unpacked, run from here
+  versions/<version>/state-snapshot/                                device state as that version left it
+  state/                                                            the firmware's persistent state
+                                                                    (FIRMWARE_STATE_DIR)
   state.json                                                        {"current": ..., "previous": ...}
+
+State policy (firmware/README.md, "State"): before every switch the agent snapshots state/
+into the folder of the version it leaves; a rollback (or any move to an older state schema)
+restores the target's snapshot, so older firmware never reads state written by newer firmware.
 
 Only the current and previous versions are kept, so a rollback can reinstall the previous
 one without downloading it. Every package is verified before it is unpacked and again
@@ -38,6 +45,8 @@ SIGNATURE_FILE = "manifest.sig"
 PACKAGE_FILE = "firmware.tar.gz"
 APP_DIR = "app"
 STATE_FILE = "state.json"
+DEVICE_STATE_DIR = "state"
+SNAPSHOT_DIR = "state-snapshot"
 MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024     # firmware packages are a few KB
 
 
@@ -177,6 +186,7 @@ class Installed:
     version: str
     app_dir: Path
     entrypoint: str
+    state_schema: Optional[int] = None    # from the manifest; None: the firmware keeps no state
 
 
 class Store:
@@ -185,6 +195,7 @@ class Store:
         self.public_key = public_key
         self.versions_dir = self.root / "versions"
         self.versions_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir = self.root / DEVICE_STATE_DIR
         self._state = self._load_state()
 
     # ---- state
@@ -281,14 +292,32 @@ class Store:
                 # The running version's folder is never replaced under it.
                 shutil.rmtree(staging, ignore_errors=True)
                 return self.installed(version)
+            if (final / SNAPSHOT_DIR).is_dir():         # a fresh copy keeps the state snapshot
+                os.replace(final / SNAPSHOT_DIR, staging / SNAPSHOT_DIR)
             shutil.rmtree(final)
         os.replace(staging, final)
         return self.installed(version)
 
     def installed(self, version: str) -> Installed:
         manifest = json.loads((self.versions_dir / version / MANIFEST_FILE).read_bytes())
+        schema = manifest.get("state_schema")
         return Installed(version, self.versions_dir / version / APP_DIR,
-                         manifest.get("entrypoint", "main.py"))
+                         manifest.get("entrypoint", "main.py"),
+                         schema if type(schema) is int else None)
+
+    # ---- device state
+
+    def has_snapshot(self, version: str) -> bool:
+        return (self.versions_dir / version / SNAPSHOT_DIR).is_dir()
+
+    def snapshot_state(self, version: str) -> None:
+        """Save the device state as `version` left it (call with the firmware stopped)."""
+        dest = self.versions_dir / version / SNAPSHOT_DIR
+        _copy_folder(self.state_dir, dest)
+
+    def restore_state(self, version: str) -> None:
+        """Replace the device state with the snapshot saved when `version` was left."""
+        _copy_folder(self.versions_dir / version / SNAPSHOT_DIR, self.state_dir)
 
     def install_from_folder(self, folder: Path, report: Report = None) -> Installed:
         """Install a package from a folder holding the three published files (factory image)."""
@@ -308,6 +337,9 @@ class Store:
                 if version != self.current:
                     log.warning("Current version %s is not usable; falling back to %s",
                                 self.current, version)
+                    if self.has_snapshot(version):
+                        self.restore_state(version)
+                        log.info("Restored the state snapshot of %s", version)
                     self.set_current(version)
                 return self.installed(version)
         factory = sorted(p for p in Path(factory_dir).iterdir()
@@ -318,3 +350,19 @@ class Store:
         installed = self.install_from_folder(factory[-1], report)
         self.set_current(installed.version)
         return installed
+
+
+def _copy_folder(src: Path, dest: Path) -> None:
+    """Make dest an exact copy of src (empty if src does not exist), swapping it in whole."""
+    tmp = dest.with_name(dest.name + ".new")
+    old = dest.with_name(dest.name + ".old")
+    shutil.rmtree(tmp, ignore_errors=True)
+    if src.is_dir():
+        shutil.copytree(src, tmp)
+    else:
+        tmp.mkdir(parents=True)
+    shutil.rmtree(old, ignore_errors=True)
+    if dest.exists():
+        os.replace(dest, old)
+    os.replace(tmp, dest)
+    shutil.rmtree(old, ignore_errors=True)
