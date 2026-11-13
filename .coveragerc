@@ -11,4 +11,4 @@ source_dirs =
 show_missing = true
 skip_empty = true
 # Raise this as tests are added; CI fails if total coverage drops below it.
-fail_under = 55
+fail_under = 70

@@ -10,3 +10,6 @@ extend-exclude = [
 
 [lint]
 select = ["E", "F", "W", "B"]
+
+[lint.per-file-ignores]
+"tools/test_dashboard.py" = ["E501"]   # HTML/SVG templates read better unwrapped

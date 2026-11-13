@@ -51,6 +51,7 @@ banner() {
 # step "Title" "Requirements covered"
 step() {
     STEP_NO=$((STEP_NO + 1))
+    STEP_TITLE=$1
     printf '\n%s━━ Step %d: %s%s\n' "$BOLD$BLUE" "$STEP_NO" "$1" "$RESET"
     [[ -n "${2:-}" ]] && printf '   %sCovers: %s%s\n' "$DIM" "$2" "$RESET"
     echo
@@ -416,14 +417,16 @@ observed() {
 # Each check is recorded for the summary. A failed check prints NOT WORKING in red with what
 # was seen instead, and the demo carries on.
 CHECKS=()
-check_pass() { CHECKS+=("pass|$1"); ok "$1"; }
+CHECK_STEPS=()     # "NUMBER|TITLE" of the step each check ran in (same index as CHECKS)
+CHECK_SEEN=()      # for failures: what was seen instead
+check_pass() { CHECKS+=("pass|$1"); CHECK_STEPS+=("$STEP_NO|${STEP_TITLE:-}"); CHECK_SEEN+=(""); ok "$1"; }
 check_fail() {
-    CHECKS+=("fail|$1")
+    CHECKS+=("fail|$1"); CHECK_STEPS+=("$STEP_NO|${STEP_TITLE:-}"); CHECK_SEEN+=("${2:-}")
     printf '   %s%s✘ NOT WORKING: %s%s\n' "$BOLD" "$RED" "$1" "$RESET"
     [[ -n "${2:-}" ]] && printf '     %sseen: %s%s\n' "$RED" "$2" "$RESET"
     return 0
 }
-check_skip() { CHECKS+=("skip|$1"); printf '   %s– skipped: %s (%s)%s\n' "$YELLOW" "$1" "$2" "$RESET"; }
+check_skip() { CHECKS+=("skip|$1"); CHECK_STEPS+=("$STEP_NO|${STEP_TITLE:-}"); CHECK_SEEN+=("$2"); printf '   %s– skipped: %s (%s)%s\n' "$YELLOW" "$1" "$2" "$RESET"; }
 
 # Devices that have not answered a command once get short waits afterwards, so a missing
 # feature costs one full timeout, not one per check.
@@ -540,6 +543,37 @@ tools_run() {
     [[ -t 1 ]] && color=(-e FORCE_COLOR=1)
     docker run --rm "${HOST_GATEWAY[@]}" "${color[@]}" -v "$REPO_ROOT:/repo:ro" -w /repo \
         "$TOOLS_IMAGE" python -I "$@"
+}
+
+# write_junit FILE: every check as a JUnit test case (one test suite per step), so CI's test
+# report and the test dashboard show the end-to-end checks next to the pytest results.
+xml_escape() { sed -e $'s/\e\\[[0-9;]*m//g' -e 's/[[:cntrl:]]//g' -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'; }
+write_junit() {
+    local file=$1 i result text step name seen failures=0 skipped=0
+    for i in "${!CHECKS[@]}"; do
+        case "${CHECKS[$i]%%|*}" in fail) failures=$((failures + 1)) ;; skip) skipped=$((skipped + 1)) ;; esac
+    done
+    {
+        printf '<?xml version="1.0" encoding="utf-8"?>\n'
+        printf '<testsuites name="end-to-end demo" tests="%d" failures="%d" skipped="%d">\n' \
+            "${#CHECKS[@]}" "$failures" "$skipped"
+        printf '<testsuite name="end-to-end demo" tests="%d" failures="%d" skipped="%d" errors="0">\n' \
+            "${#CHECKS[@]}" "$failures" "$skipped"
+        for i in "${!CHECKS[@]}"; do
+            result=${CHECKS[$i]%%|*}
+            text=$(printf '%s' "${CHECKS[$i]#*|}" | xml_escape)
+            step=${CHECK_STEPS[$i]}
+            name=$(printf 'Step %02d: %s' "${step%%|*}" "${step#*|}" | xml_escape)
+            seen=$(printf '%s' "${CHECK_SEEN[$i]}" | xml_escape)
+            printf '  <testcase classname="e2e.%s" name="%s" time="0">' "$name" "$text"
+            case "$result" in
+                fail) printf '<failure message="NOT WORKING">%s</failure>' "$seen" ;;
+                skip) printf '<skipped message="%s"/>' "$seen" ;;
+            esac
+            printf '</testcase>\n'
+        done
+        printf '</testsuite>\n</testsuites>\n'
+    } >"$file"
 }
 
 # --------------------------------------------------------------------------- steps

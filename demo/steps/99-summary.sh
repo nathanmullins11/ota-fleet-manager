@@ -24,6 +24,10 @@ for c in "${CHECKS[@]}"; do
 done
 # The entry scripts exit with this, so CI fails when a check fails.
 ((failed)) && DEMO_STATUS=1
+# CI: every check as JUnit XML, for the test report and the test dashboard.
+if [[ -n "${DEMO_JUNIT:-}" ]]; then
+    write_junit "$DEMO_JUNIT" && info "Checks written to $DEMO_JUNIT"
+fi
 printf '   %sChecks:%s %s%d passed%s' "$BOLD" "$RESET" "$GREEN" "$passed" "$RESET"
 ((failed)) && printf ', %s%s%d NOT WORKING%s' "$BOLD" "$RED" "$failed" "$RESET"
 ((skipped)) && printf ', %s%d skipped%s' "$YELLOW" "$skipped" "$RESET"
