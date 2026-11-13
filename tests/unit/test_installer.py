@@ -175,3 +175,41 @@ def test_checks_are_reported_in_order_and_stop_at_the_first_failure(installer, s
                              package=f["firmware.tar.gz"], public_key=signing_key.public_key(),
                              expected_version="2.0", report=lines.append)
     assert [line.split(": ")[-1] for line in lines] == ["OK"] * 4
+
+
+
+def test_state_snapshot_and_restore(installer, store, factory_dir):
+    store.bootable(factory_dir)
+    store.state_dir.mkdir(parents=True, exist_ok=True)
+    (store.state_dir / "config.json").write_text('{"state_schema": 1}')
+    store.snapshot_state("1.0")
+    (store.state_dir / "config.json").write_text('{"state_schema": 2}')
+    (store.state_dir / "extra.txt").write_text("written by 2.0")
+    assert store.has_snapshot("1.0") and not store.has_snapshot("2.0")
+    store.restore_state("1.0")
+    assert (store.state_dir / "config.json").read_text() == '{"state_schema": 1}'
+    assert not (store.state_dir / "extra.txt").exists()      # an exact copy, not a merge
+
+
+def test_snapshot_of_missing_state_restores_to_empty(installer, store, factory_dir):
+    store.bootable(factory_dir)
+    store.snapshot_state("1.0")
+    store.state_dir.mkdir(parents=True, exist_ok=True)
+    (store.state_dir / "config.json").write_text("{}")
+    store.restore_state("1.0")
+    assert list(store.state_dir.iterdir()) == []
+
+
+def test_reinstalling_a_version_keeps_its_snapshot(installer, store, packages, factory_dir):
+    store.bootable(factory_dir)
+    store.add("2.0", download(installer, packages, "2.0"))
+    store.set_current("2.0")
+    store.snapshot_state("1.0")
+    store.add("1.0", download(installer, packages, "1.0"))     # e.g. after a damaged copy
+    assert store.has_snapshot("1.0")
+
+
+def test_installed_reports_the_manifest_state_schema(installer, store, packages, factory_dir):
+    assert store.bootable(factory_dir).state_schema == 1
+    assert store.add("2.0", download(installer, packages, "2.0")).state_schema == 2
+    assert store.add("9.0", download(installer, packages, "9.0")).state_schema is None

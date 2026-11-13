@@ -58,6 +58,21 @@ if begin_rollback "$ROLLOUT_RID"; then
     checks_ok=$(device_log "$first" "$t0" "^[0-9:]+ 1.0 check [0-9]/4 .*: OK$" | wc -l)
     proof "$first re-verified its kept copy of 1.0 against the command ($checks_ok of 4 checks OK) before running it"
     proof "$first's installed state: $(device_state_file "$first")"
+    # Firmware state policy: the pre-update snapshot is restored, so 1.0 reads its own state.
+    state_restored=0
+    for d in "${ROLLOUT_TARGETS[@]}"; do
+        if [[ "$(firmware_config "$d" | json_field state_schema)" == 1 ]] \
+                && device_log "$d" "$t0" "Restored the state snapshot of 1.0" | grep -q .; then
+            state_restored=$((state_restored + 1))
+        fi
+    done
+    if ((state_restored == ${#ROLLOUT_TARGETS[@]})); then
+        check_pass "Every device's pre-update state (schema 1) was restored, so 1.0 started cleanly on it"
+    else
+        check_fail "Only $state_restored of ${#ROLLOUT_TARGETS[@]} devices had their schema 1 state restored" \
+                   "$first: $(firmware_config "$first")"
+    fi
+    proof "$first's firmware state: $(firmware_config "$first")"
     timing=$(rollout_timing rollback "$ROLLOUT_RID") && proof "rollback timing: $timing"
     detail "Firmware processes on every device:" printf '%s\n' "${process_lines[@]}"
     detail "$first's log for the rollback:" device_log "$first" "$t0" "1.0|Command received|Event sent|Firmware 2.0 stopped"

@@ -3,7 +3,8 @@
   "filename": "firmware.tar.gz",
   "notes": "healthy baseline",
   "schema_version": 1,
-  "sha256": "c2ec7f6ae921a7e130f7bb86e43dddc1ef2662c2ffd870c7dc1e725d79819228",
-  "size_bytes": 708,
+  "sha256": "be2a47561dad064d2c08d6ddeff26b83b3f7c1ce8ab441bb024d38964dc1de70",
+  "size_bytes": 1517,
+  "state_schema": 1,
   "version": "1.0"
 }

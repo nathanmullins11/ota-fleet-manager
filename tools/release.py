@@ -57,6 +57,8 @@ MANIFEST_SCHEMA_VERSION = 1
 # Same rule as the registry and the message contract.
 VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)?", re.ASCII)
 SOURCE_VERSION_RE = re.compile(r'^VERSION = "([^"]*)"$', re.MULTILINE)
+# The state schema the firmware writes (firmware/README.md, "State"); goes into the manifest.
+SOURCE_STATE_SCHEMA_RE = re.compile(r"^STATE_SCHEMA = (\d+)$", re.MULTILINE)
 
 
 class ReleaseError(Exception):
@@ -111,6 +113,12 @@ def source_version(src: Path) -> str:
     return match[1]
 
 
+def source_state_schema(src: Path) -> int | None:
+    """STATE_SCHEMA declared in the firmware source, or None if it keeps no state."""
+    match = SOURCE_STATE_SCHEMA_RE.search((src / ENTRYPOINT).read_text())
+    return int(match[1]) if match else None
+
+
 def build_tarball(src: Path) -> bytes:
     """Pack src reproducibly: sorted entries, fixed timestamps, owners and modes."""
     raw = io.BytesIO()
@@ -140,7 +148,8 @@ def build_tarball(src: Path) -> bytes:
     return out.getvalue()
 
 
-def build_manifest(version: str, package: bytes, notes: str) -> bytes:
+def build_manifest(version: str, package: bytes, notes: str,
+                   state_schema: int | None = None) -> bytes:
     manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "version": version,
@@ -150,6 +159,8 @@ def build_manifest(version: str, package: bytes, notes: str) -> bytes:
         "sha256": hashlib.sha256(package).hexdigest(),
         "notes": notes,
     }
+    if state_schema is not None:
+        manifest["state_schema"] = state_schema     # tells the agent which state it writes
     return (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
 
 
@@ -168,7 +179,7 @@ def build(version: str, src: Path, out_root: Path, key: Ed25519PrivateKey) -> Pa
     notes = notes_path.read_text().strip() if notes_path.is_file() else ""
 
     package = build_tarball(src)
-    manifest = build_manifest(version, package, notes)
+    manifest = build_manifest(version, package, notes, source_state_schema(src))
     signature = sign(manifest, key)
 
     out = out_root / version

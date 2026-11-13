@@ -159,6 +159,18 @@ if begin_rollout 2.0 u "update every online device to 2.0" --all; then
     reports=$(device_log "$first" "$t0" "Firmware 2.0 reports:" | head -n 1 | sed 's/^[0-9:]* Firmware 2.0 reports: //')
     proof "firmware 2.0's own first output on $first: ${reports:-none} (1.0 never prints uptime_seconds)"
     proof "$first's installed state: $(device_state_file "$first")"
+    # Firmware state policy: 2.0 converts the device's state to schema 2, which 1.0 cannot read.
+    converted=0
+    for d in "${ROLLOUT_TARGETS[@]}"; do
+        [[ "$(firmware_config "$d" | json_field state_schema)" == 2 ]] && converted=$((converted + 1))
+    done
+    if ((converted == ${#ROLLOUT_TARGETS[@]})); then
+        check_pass "Firmware 2.0 converted every device's state to schema 2 (1.0 cannot read it; the agent kept a snapshot)"
+    else
+        check_fail "Only $converted of ${#ROLLOUT_TARGETS[@]} devices have schema 2 state after the update" \
+                   "$first: $(firmware_config "$first")"
+    fi
+    proof "$first's firmware state: $(firmware_config "$first")"
     timing=$(rollout_timing update "$RID") && proof "rollout $RID timing: $timing"
     detail "Firmware processes on every device:" printf '%s\n' "${process_lines[@]}"
     detail "$first's log for the update:" device_log "$first" "$t0" "2.0|Command received|Event sent|Firmware 1.0 stopped"

@@ -249,6 +249,11 @@ describe_process() {
     else printf 'no firmware process'; fi
 }
 device_state_file() { docker exec "$(container_of "$1")" cat /home/agent/firmware/state.json 2>/dev/null | tr -d '\n'; }
+# The firmware's own persistent state (firmware/README.md, "State"), on one line.
+firmware_config() {
+    docker exec "$(container_of "$1")" cat /home/agent/firmware/state/config.json 2>/dev/null \
+        | tr -d '\n' | tr -s ' '
+}
 # "STARTED_AT RESTART_COUNT" of the device's container.
 container_info() { docker inspect -f '{{.State.StartedAt}} {{.RestartCount}}' "$(container_of "$1")" 2>/dev/null; }
 # device_log DEVICE SINCE [PATTERN]: the device's own log since a time, as "HH:MM:SS message".
