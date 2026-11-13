@@ -9,7 +9,18 @@ Scripted demos of the OTA Update Fleet Manager in two setups:
 
 Each step says what is about to happen and which requirement it covers, does it, and shows the result. By default the script waits for **Enter** before each step so you can talk; `--auto` runs straight through (about 4 minutes).
 
-**Real by default, `--simulate` for a clean run.** By default the demo checks what the devices *really* do: install firmware, report crashes, roll back, refuse forged commands. Anything they do not do is printed in red as **✘ NOT WORKING**, with what was seen instead, and the demo carries on; the summary lists every check. Until the device update logic (Iteration 2, David) is done, the device-side checks are expected to be red. `--simulate` keeps the earlier behaviour: the demo fakes the device replies and the crash heartbeat (marked SIMULATED), for presenting before that work lands.
+**Real by default, `--simulate` for a clean run.** By default the demo checks what the devices *really* do: install firmware, report crashes, roll back, refuse forged commands. Anything they do not do is printed in red as **✘ NOT WORKING**, with what was seen instead, and the demo carries on; the summary lists every check. With the device update logic in place, a local run passes every check (47 with 5 devices). `--simulate` keeps the earlier behaviour: the demo fakes the device replies and the crash heartbeat (marked SIMULATED), for presenting before that work lands.
+
+**Proof, not just reports.** Heartbeats and events are what a device *says*. Each claim is also checked from inside the device containers, independently of MQTT, and shown as a 🔎 line:
+
+- **The firmware process.** Its process ID and the version folder it runs from: a new process after an update, the same one after a refused attack.
+- **The device's own log.** Each verification check in order, which files were downloaded, the crash and restart, and "Using the kept copy" on rollback.
+- **Its installed state.** `state.json`: current and previous version.
+- **Timing.** From the first command to the last device's reply.
+
+The script exits with status 1 if any check is NOT WORKING, so CI runs it as the end-to-end test (job `e2e`).
+
+`--detail` adds the full device log excerpts, every device's process change, raw MQTT messages and the orchestrator's decision log. Use it for Q&A or a recorded run; the default stays short enough for a 5 to 10 minute presentation.
 
 ## What it shows
 
@@ -39,6 +50,7 @@ From the repository root:
 ```bash
 demo/local/demo.sh            # Enter between steps
 demo/local/demo.sh --auto     # no pauses
+demo/local/demo.sh --detail   # full evidence (device logs, processes, raw messages)
 demo/local/demo.sh --keep     # leave everything running afterwards
 ```
 

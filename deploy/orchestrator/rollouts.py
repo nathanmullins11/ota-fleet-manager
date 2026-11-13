@@ -64,7 +64,7 @@ class RolloutStore:
             return None
         keys = ("id", "target_version", "rollback_version", "state", "halt_reason",
                 "started_at", "ended_at")
-        return dict(zip(keys, row))
+        return dict(zip(keys, row, strict=True))
 
     def rollouts(self, limit: int = 10) -> list[tuple]:
         return self.db.run(lambda conn: conn.execute(
@@ -236,7 +236,7 @@ class RolloutRunner:
                 continue
             new_state, event, reason = result
 
-            def work(conn, rid=rid, state=state):
+            def work(conn, rid=rid, state=state, new_state=new_state, event=event, reason=reason):
                 with conn.transaction():
                     changed = conn.execute(
                         "UPDATE rollouts SET state = %s, ended_at = now() "

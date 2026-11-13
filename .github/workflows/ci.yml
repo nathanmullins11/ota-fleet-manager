@@ -1,8 +1,14 @@
-# Runs on every pull request and every push to main. All three jobs must pass to merge.
+# Runs on every pull request and every push to main. All jobs must pass to merge.
 #
-#   tests       pytest: unit tests + firmware component tests (no containers needed)
+#   tests       pytest: unit + component tests (orchestrator tests use a Postgres service), with
+#               a coverage floor
+#   lint        ruff: Python bug-finding rules (ruff.toml)
 #   shellcheck  the fleet launcher, bootstrap and demo scripts
 #   docker      both Compose files are valid and every image builds
+#   e2e         the full local demo on the runner: real control plane, 5 real devices, every
+#               check (install, crash report, signed firmware, rollout, rollback) must pass
+#   dashboard   test dashboard and badges from the tests and e2e results (tools/test_dashboard.py);
+#               published to GitHub Pages on pushes to main, attached to the run otherwise
 name: CI
 
 on:
@@ -24,6 +30,27 @@ jobs:
     name: Tests (pytest)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write                     # the "Test results" check with every test listed
+    # Throwaway database for the orchestrator's rollout and registry tests
+    # (tests/component/test_rollouts.py, test_db.py). OTA_REQUIRE_DB makes them fail, not skip,
+    # if it is missing.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ota
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+          POSTGRES_DB: ota_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ota -d ota_test"
+          --health-interval 2s --health-timeout 5s --health-retries 15
+    env:
+      OTA_TEST_DB: host=localhost port=5432 user=ota password=ci-only-not-a-secret dbname=ota_test
+      OTA_REQUIRE_DB: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -36,15 +63,57 @@ jobs:
       - name: Install test dependencies
         run: pip install -r tests/requirements.txt
 
+      # Coverage settings and the minimum (fail_under) are in .coveragerc.
       - name: Run unit and component tests
-        run: pytest -m "unit or component" -ra --junitxml=test-results.xml
+        run: |
+          pytest -m "unit or component" -ra --junitxml=test-results.xml \
+                 --cov --cov-report=term --cov-report=xml:coverage.xml --cov-report=html:htmlcov
+
+      - name: Test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: Test results (unit + component)
+          path: test-results.xml
+          reporter: java-junit
+          fail-on-empty: false
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          {
+            echo "### Test coverage"
+            echo '```'
+            coverage report --skip-covered 2>/dev/null || echo "no coverage data"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-results
-          path: test-results.xml
+          path: |
+            test-results.xml
+            coverage.xml
+            htmlcov/
+
+  lint:
+    name: Python lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Rules and exclusions are in ruff.toml.
+      - name: Check Python code
+        run: |
+          pip install ruff==0.17.4
+          ruff check --output-format=github .
 
   shellcheck:
     name: Shell scripts (shellcheck)
@@ -84,3 +153,105 @@ jobs:
 
       - name: Build demo tools image
         run: docker build -t ota-demo-tools -f demo/lib/tools.Dockerfile tools
+
+  e2e:
+    name: End-to-end (local demo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      checks: write
+    env:
+      DEMO_JUNIT: e2e-results.xml       # every demo check as a test case
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same script presenters run. It builds and starts its own control plane and
+      # devices, exits 1 if any check is NOT WORKING, and removes everything at the end.
+      - name: Run the demo straight through
+        shell: bash
+        run: demo/local/demo.sh --auto --detail 2>&1 | tee demo-output.txt
+
+      - name: Demo summary
+        if: always()
+        run: |
+          {
+            echo "### End-to-end demo"
+            echo '```'
+            grep -E "Checks:|NOT WORKING|skipped:" demo-output.txt || echo "the demo did not reach its summary"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: Test results (end-to-end checks)
+          path: e2e-results.xml
+          reporter: java-junit
+          fail-on-empty: false
+
+      - name: Upload demo output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-demo-output
+          path: |
+            demo-output.txt
+            e2e-results.xml
+
+  dashboard:
+    name: Test dashboard
+    needs: [tests, e2e]
+    if: always()                        # failing runs publish too, showing what failed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download test results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: test-results
+          path: reports
+
+      - name: Download end-to-end results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: e2e-demo-output
+          path: reports
+
+      - name: Build the dashboard
+        run: |
+          python tools/test_dashboard.py --junit reports/test-results.xml \
+              --junit reports/e2e-results.xml --coverage reports/coverage.xml \
+              --htmlcov reports/htmlcov --out site
+
+      # Also downloadable from the run's artifacts (github-pages), to preview a PR's dashboard.
+      - name: Package for GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  publish-dashboard:
+    name: Publish dashboard
+    needs: dashboard
+    if: always() && needs.dashboard.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

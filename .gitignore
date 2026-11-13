@@ -8,3 +8,7 @@ keys/release-private.pem
 
 # Fleet launcher measurements (deploy/device-agent/fleet.sh stats)
 deploy/device-agent/fleet-stats/
+
+# Coverage data (pytest --cov)
+.coverage
+coverage.xml

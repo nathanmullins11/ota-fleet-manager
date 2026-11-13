@@ -38,6 +38,9 @@ say "it installs and reports 2.1, runs healthy for ~10 s, reports errors, crashe
 say "agent keeps sending heartbeats with crash_count while it restarts the firmware."
 echo
 mark=$(listener_mark)
+t0=$(now_utc)
+pid_before=$(firmware_pid device-003)
+container_before=$(container_info device-003)
 if begin_rollout 2.1 f "faulty 2.1 to device-003" --devices device-003; then
     crash_rid=$RID
     if expect "$(event_timeout)" "device-003 installs 2.1 and reports update_succeeded" \
@@ -50,6 +53,30 @@ if begin_rollout 2.1 f "faulty 2.1 to device-003" --devices device-003; then
             hb_ever_above "$mark" device-003 crash_count 0 || true
         expect 10 "device-003 reports status unhealthy" "$mark" device-003 \
             hb_ever_is "$mark" device-003 status unhealthy || true
+
+        # Proof from inside the container: the firmware process crashed, the device did not.
+        restarted() { device_log device-003 "$t0" "Restarting firmware 2.1" | grep -q .; }
+        wait_until 8 "waiting for the agent to restart the firmware" restarted || true
+        crash_line=$(device_log device-003 "$t0" "Firmware 2.1 crashed" | head -n 1)
+        restart_line=$(device_log device-003 "$t0" "Restarting firmware 2.1" | head -n 1)
+        container_after=$(container_info device-003)
+        # Every firmware 2.1 process the agent started, from its log: "Firmware 2.1 started (pid N)".
+        mapfile -t pids_21 < <(device_log device-003 "$t0" "Firmware 2.1 started" | sed -n 's/.*(pid \([0-9]*\)).*/\1/p')
+        if [[ -n "$crash_line" && "$container_after" == "$container_before" ]]; then
+            check_pass "The firmware crashed, the device did not: same container since ${container_before:11:8} UTC, ${container_before##* } restarts"
+        else
+            check_fail "No firmware crash in device-003's own log while its container stayed up" \
+                       "crash line: ${crash_line:-none}; container before/after: $container_before / $container_after"
+        fi
+        [[ -n "$crash_line" ]] && proof "device-003's log: $crash_line"
+        [[ -n "$restart_line" ]] && proof "device-003's log: $restart_line"
+        if ((${#pids_21[@]} >= 2)); then
+            proof "firmware processes: pid ${pid_before:-?} (1.0) → pid ${pids_21[0]} (2.1, crashed) → pid ${pids_21[1]} (2.1, restarted by the agent)"
+        else
+            proof "firmware process: pid ${pid_before:-?} (1.0) before the update, now $(describe_process device-003)"
+        fi
+        crash_log() { device_log device-003 "$t0" | tail -n 30; }
+        detail "device-003's log since the rollout started (install, checks, crash, restart):" crash_log
     else
         DEVICES_SILENT=1
         reason=$(event_reason "$mark" device-003 update_failed "$crash_rid")
@@ -72,6 +99,7 @@ if begin_rollout 2.1 f "faulty 2.1 to device-003" --devices device-003; then
 
     say "Rolling device-003 back to 1.0 so the next steps start from a clean fleet."
     rb_mark=$(listener_mark)
+    rb_time=$(now_utc)
     installed=0
     event_seen "$mark" device-003 update_succeeded "$crash_rid" && installed=1
     if begin_rollback "$crash_rid"; then
@@ -80,6 +108,17 @@ if begin_rollout 2.1 f "faulty 2.1 to device-003" --devices device-003; then
             if [[ "$installed" == 1 ]]; then
                 expect 20 "device-003's heartbeat reports 1.0 again" "$rb_mark" device-003 \
                     hb_is "$rb_mark" device-003 version 1.0 || true
+                kept=$(device_log device-003 "$rb_time" "Using the kept copy of 1.0" | head -n 1)
+                downloaded=$(device_log device-003 "$rb_time" "Downloading 1.0")
+                if [[ "$(firmware_running_version device-003)" == 1.0 && -n "$kept" && -z "$downloaded" ]]; then
+                    check_pass "device-003 runs firmware 1.0 again, restored from its kept copy without a download ($(describe_process device-003))"
+                else
+                    check_fail "device-003 did not restore 1.0 from its kept copy" \
+                               "running: $(describe_process device-003); log: ${kept:-no kept-copy line}${downloaded:+; it downloaded 1.0}"
+                fi
+                if [[ "$CP_LOCAL" == 1 ]]; then
+                    detail "The orchestrator's record of rollout $crash_rid (NF-5 decision log):" cli rollout status "$crash_rid"
+                fi
             fi
         else
             DEVICES_SILENT=1

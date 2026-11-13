@@ -28,9 +28,11 @@ This is the contract the device agent codes against.
 | `status` | string | `healthy`, `degraded` or `unhealthy` |
 | `errors` | integer | Errors during this tick (not a running total) |
 
-Other fields may appear and should be ignored. For the heartbeat, the agent reports the latest `status` and the sum of `errors` since the previous heartbeat. **stderr** is for human-readable log lines only.
+Other fields may appear and should be ignored. For the heartbeat, the agent reports the worst `status` and the sum of `errors` since the previous heartbeat. **stderr** is for human-readable log lines only (the agent copies them into its own log).
 
 **Stopping.** On SIGTERM (or SIGINT) the firmware stops at once and exits with code **0**.
+
+**Starting properly.** After an update, the new firmware must print a `healthy` or `degraded` status within 5 seconds; otherwise the agent restarts the old version and reports the update as failed.
 
 **Crashing.** Any exit the agent did not ask for, or any non-zero exit code, is a crash. The agent should report it (see below) and restart the firmware after a short delay. The container stays up, so the orchestrator can tell a firmware crash (heartbeats continue, unhealthy) from an offline device (heartbeats stop).
 

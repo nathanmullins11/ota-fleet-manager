@@ -6,7 +6,8 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture
 def env(monkeypatch):
-    for key in ("DEVICE_ID", "FIRMWARE_VERSION", "HEARTBEAT_INTERVAL_SECONDS", "MQTT_PORT"):
+    for key in ("DEVICE_ID", "HEARTBEAT_INTERVAL_SECONDS", "MQTT_PORT", "FIRMWARE_DIR",
+                "FIRMWARE_START_TIMEOUT_SECONDS"):
         monkeypatch.delenv(key, raising=False)
 
     def set_env(**values):
@@ -15,10 +16,12 @@ def env(monkeypatch):
     return set_env
 
 
-def test_valid_config(agent_config, env):
-    env(DEVICE_ID="device-001", FIRMWARE_VERSION="2.1.3")
+def test_valid_config(agent_config, env, tmp_path):
+    env(DEVICE_ID="device-001", FIRMWARE_DIR=str(tmp_path))
     cfg = agent_config.load_config()
-    assert (cfg.device_id, cfg.firmware_version) == ("device-001", "2.1.3")
+    assert (cfg.device_id, cfg.firmware_dir) == ("device-001", tmp_path)
+    assert (cfg.factory_dir / "1.0" / "manifest.json").is_file()
+    assert cfg.public_key_path.is_file()
 
 
 @pytest.mark.parametrize("device_id", ["device-001\n", "device-١٢٣", "device-01", ""])
@@ -28,10 +31,12 @@ def test_bad_device_id_exits(agent_config, env, device_id):
         agent_config.load_config()
 
 
-@pytest.mark.parametrize("version", ["1.0\n", "١.٠", "1", "v1.0"])
-def test_bad_firmware_version_exits(agent_config, env, version):
-    env(DEVICE_ID="device-001", FIRMWARE_VERSION=version)
-    with pytest.raises(SystemExit, match="FIRMWARE_VERSION"):
+@pytest.mark.parametrize("key,value", [("HEARTBEAT_INTERVAL_SECONDS", "0"),
+                                       ("HEARTBEAT_INTERVAL_SECONDS", "x"),
+                                       ("FIRMWARE_START_TIMEOUT_SECONDS", "-1")])
+def test_bad_timing_setting_exits(agent_config, env, key, value):
+    env(DEVICE_ID="device-001", **{key: value})
+    with pytest.raises(SystemExit, match=key):
         agent_config.load_config()
 
 

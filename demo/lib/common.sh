@@ -6,6 +6,7 @@
 #   MQTT_HOST      broker address as seen from a container on this machine
 #   REGISTRY_URL   software registry base URL as seen from a container on this machine
 #   AUTO           1 to run without waiting for Enter
+#   DETAIL         1 to show full evidence (device logs, processes, raw messages)
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEMO_DIR="$REPO_ROOT/demo"
@@ -18,6 +19,7 @@ MQTT_PORT=${MQTT_PORT:-1883}
 DEVICE_COUNT=${DEVICE_COUNT:-5}
 REGISTRY_REACHABLE=${REGISTRY_REACHABLE:-1}
 SIMULATE=${SIMULATE:-0}
+DETAIL=${DETAIL:-0}
 
 DEVICE_IMAGE=ota-demo-device-agent
 TOOLS_IMAGE=ota-demo-tools
@@ -49,6 +51,7 @@ banner() {
 # step "Title" "Requirements covered"
 step() {
     STEP_NO=$((STEP_NO + 1))
+    STEP_TITLE=$1
     printf '\n%s━━ Step %d: %s%s\n' "$BOLD$BLUE" "$STEP_NO" "$1" "$RESET"
     [[ -n "${2:-}" ]] && printf '   %sCovers: %s%s\n' "$DIM" "$2" "$RESET"
     echo
@@ -204,7 +207,7 @@ start_device() {
     docker run -d --name "$(device_name "$i")" --label "$DEMO_LABEL" "${HOST_GATEWAY[@]}" \
         -e DEVICE_ID="$(device_id "$i")" \
         -e MQTT_HOST="$MQTT_HOST" -e MQTT_PORT="$MQTT_PORT" \
-        -e FIRMWARE_VERSION=1.0 -e HEARTBEAT_INTERVAL_SECONDS=5 \
+        -e HEARTBEAT_INTERVAL_SECONDS=5 \
         "$DEVICE_IMAGE" >/dev/null
 }
 
@@ -215,6 +218,72 @@ remove_devices() {
     ids=$(docker ps -aq --filter "label=$DEMO_LABEL")
     [[ -n "$ids" ]] && docker rm -f $ids >/dev/null
     return 0
+}
+
+# ----------------------------------------------------------------------------- device-side proof
+# Evidence from inside a device container, independent of what the device reports over MQTT:
+# the firmware process actually running, the device's own log, and its installed state.
+# These read the demo's device containers on this computer, so they work in both setups.
+
+# Device containers are named after the device ID: device-003 -> ota-demo-device-003.
+container_of() { printf 'ota-demo-%s' "$1"; }
+
+# Lists "PID FOLDER" for each process running main.py (the firmware) in the container.
+FIRMWARE_PS='import os
+for p in sorted((p for p in os.listdir("/proc") if p.isdigit()), key=int):
+    try:
+        cmd = open(f"/proc/{p}/cmdline", "rb").read().split(b"\0")
+        cwd = os.readlink(f"/proc/{p}/cwd")
+    except OSError:
+        continue
+    if b"main.py" in cmd:
+        print(p, cwd)'
+firmware_process() { docker exec "$(container_of "$1")" python -c "$FIRMWARE_PS" 2>/dev/null | head -n 1; }
+firmware_pid() { firmware_process "$1" | cut -d' ' -f1; }
+# The version folder the firmware process runs from (empty if none is running).
+firmware_running_version() { firmware_process "$1" | sed -n 's|.*/versions/\([^/]*\)/app$|\1|p'; }
+describe_process() {
+    local p
+    p=$(firmware_process "$1")
+    if [[ -n "$p" ]]; then printf 'pid %s running %s/main.py' "${p%% *}" "${p#* }" | sed 's|/home/agent|~|'
+    else printf 'no firmware process'; fi
+}
+device_state_file() { docker exec "$(container_of "$1")" cat /home/agent/firmware/state.json 2>/dev/null | tr -d '\n'; }
+# "STARTED_AT RESTART_COUNT" of the device's container.
+container_info() { docker inspect -f '{{.State.StartedAt}} {{.RestartCount}}' "$(container_of "$1")" 2>/dev/null; }
+# device_log DEVICE SINCE [PATTERN]: the device's own log since a time, as "HH:MM:SS message".
+device_log() {
+    docker logs --since "$2" "$(container_of "$1")" 2>&1 \
+        | sed -E 's/^[0-9-]+ ([0-9:]+),[0-9]+ [A-Z]+ [a-z.-]+: /\1 /' \
+        | { if [[ -n "${3:-}" ]]; then grep -E -- "$3"; else cat; fi; } || true
+}
+# One compact line of evidence, shown in every run.
+proof() { printf '   %s🔎 %s%s\n' "$CYAN" "$*" "$RESET"; }
+# detail "title" command [args...]: fuller evidence, only with --detail.
+detail() {
+    [[ "${DETAIL:-0}" == 1 ]] || return 0
+    local title=$1
+    shift
+    printf '   %s%s%s\n' "$BOLD" "$title" "$RESET"
+    "$@" | indent
+}
+# raw_message MARK DEVICE KIND [EVENT]: the latest heartbeat/event/command since MARK, pretty-printed.
+raw_message() {
+    lines_since "$1" | grep " ota/devices/$2/$3 " | { if [[ -n "${4:-}" ]]; then grep "\"event\": *\"$4\""; else cat; fi; } \
+        | tail -n 1 | show_command
+}
+# rollout_timing KIND ROLLOUT_ID: from the first command to the last device's success event,
+# using the listener's arrival times.
+rollout_timing() {
+    local kind=$1 rid=$2 first last
+    first=$(commands_seen "$kind" "$rid" | head -n 1 | cut -d' ' -f1)
+    last=$(listener_lines | grep " ota/devices/[^/]*/events " | grep "\"event\": *\"${kind}_succeeded\"" \
+           | grep "\"rollout_id\": *${rid}[,}]" | tail -n 1 | cut -d' ' -f1)
+    [[ -n "$first" && -n "$last" ]] || return 1
+    local took=$(( $(date -d "$last" +%s) - $(date -d "$first" +%s) ))
+    if ((took < 1)); then took="under 1 s"; else took="$took s"; fi
+    printf 'first command %s, last %s_succeeded %s (%s; times to the second)' \
+        "${first:11:8}" "$kind" "${last:11:8}" "$took"
 }
 
 # mqtt_pub TOPIC PAYLOAD: publish as an outside client, the way a device would.
@@ -348,14 +417,16 @@ observed() {
 # Each check is recorded for the summary. A failed check prints NOT WORKING in red with what
 # was seen instead, and the demo carries on.
 CHECKS=()
-check_pass() { CHECKS+=("pass|$1"); ok "$1"; }
+CHECK_STEPS=()     # "NUMBER|TITLE" of the step each check ran in (same index as CHECKS)
+CHECK_SEEN=()      # for failures: what was seen instead
+check_pass() { CHECKS+=("pass|$1"); CHECK_STEPS+=("$STEP_NO|${STEP_TITLE:-}"); CHECK_SEEN+=(""); ok "$1"; }
 check_fail() {
-    CHECKS+=("fail|$1")
+    CHECKS+=("fail|$1"); CHECK_STEPS+=("$STEP_NO|${STEP_TITLE:-}"); CHECK_SEEN+=("${2:-}")
     printf '   %s%s✘ NOT WORKING: %s%s\n' "$BOLD" "$RED" "$1" "$RESET"
     [[ -n "${2:-}" ]] && printf '     %sseen: %s%s\n' "$RED" "$2" "$RESET"
     return 0
 }
-check_skip() { CHECKS+=("skip|$1"); printf '   %s– skipped: %s (%s)%s\n' "$YELLOW" "$1" "$2" "$RESET"; }
+check_skip() { CHECKS+=("skip|$1"); CHECK_STEPS+=("$STEP_NO|${STEP_TITLE:-}"); CHECK_SEEN+=("$2"); printf '   %s– skipped: %s (%s)%s\n' "$YELLOW" "$1" "$2" "$RESET"; }
 
 # Devices that have not answered a command once get short waits afterwards, so a missing
 # feature costs one full timeout, not one per check.
@@ -472,6 +543,37 @@ tools_run() {
     [[ -t 1 ]] && color=(-e FORCE_COLOR=1)
     docker run --rm "${HOST_GATEWAY[@]}" "${color[@]}" -v "$REPO_ROOT:/repo:ro" -w /repo \
         "$TOOLS_IMAGE" python -I "$@"
+}
+
+# write_junit FILE: every check as a JUnit test case (one test suite per step), so CI's test
+# report and the test dashboard show the end-to-end checks next to the pytest results.
+xml_escape() { sed -e $'s/\e\\[[0-9;]*m//g' -e 's/[[:cntrl:]]//g' -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'; }
+write_junit() {
+    local file=$1 i result text step name seen failures=0 skipped=0
+    for i in "${!CHECKS[@]}"; do
+        case "${CHECKS[$i]%%|*}" in fail) failures=$((failures + 1)) ;; skip) skipped=$((skipped + 1)) ;; esac
+    done
+    {
+        printf '<?xml version="1.0" encoding="utf-8"?>\n'
+        printf '<testsuites name="end-to-end demo" tests="%d" failures="%d" skipped="%d">\n' \
+            "${#CHECKS[@]}" "$failures" "$skipped"
+        printf '<testsuite name="end-to-end demo" tests="%d" failures="%d" skipped="%d" errors="0">\n' \
+            "${#CHECKS[@]}" "$failures" "$skipped"
+        for i in "${!CHECKS[@]}"; do
+            result=${CHECKS[$i]%%|*}
+            text=$(printf '%s' "${CHECKS[$i]#*|}" | xml_escape)
+            step=${CHECK_STEPS[$i]}
+            name=$(printf 'Step %02d: %s' "${step%%|*}" "${step#*|}" | xml_escape)
+            seen=$(printf '%s' "${CHECK_SEEN[$i]}" | xml_escape)
+            printf '  <testcase classname="e2e.%s" name="%s" time="0">' "$name" "$text"
+            case "$result" in
+                fail) printf '<failure message="NOT WORKING">%s</failure>' "$seen" ;;
+                skip) printf '<skipped message="%s"/>' "$seen" ;;
+            esac
+            printf '</testcase>\n'
+        done
+        printf '</testsuite>\n</testsuites>\n'
+    } >"$file"
 }
 
 # --------------------------------------------------------------------------- steps

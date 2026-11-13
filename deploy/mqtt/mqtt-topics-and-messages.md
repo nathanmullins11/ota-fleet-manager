@@ -199,9 +199,10 @@ The registry's `/versions` endpoint returns relative URLs (`/packages/2.0`, `/pa
 Fields are the same as the update command. `target_version` here is the version to **go back to**. The agent normally reinstalls the copy of the previous version it kept locally and verifies it against `sha256`. `download_url` is a fallback if the local copy is missing or fails verification.
 
 **Agent behavior rules:**
-- **Idempotent:** if `target_version` is already the running version, do nothing except report the current state. This makes repeated or replayed commands harmless.
-- **One at a time:** ignore a new command while an update or rollback is still in progress, or queue it. (**To confirm** with David which.)
-- **Always report:** send an event for every command received, success or failure.
+- **Idempotent:** if `target_version` is already the running version, do nothing except answer `update_succeeded` / `rollback_succeeded` with the reason `already running <version>`. This makes repeated or replayed commands harmless.
+- **One at a time:** a command that arrives while an update or rollback is in progress is queued and handled after it, in order.
+- **Always report:** send an event for every command received, success or failure. A malformed command that still has a valid `command`, `rollout_id` and `target_version` is answered with `update_failed` / `rollback_failed` and the reason `invalid command: <what is wrong>`; one without them cannot be answered and is only logged by the device.
+- **Starts properly or reverts:** new firmware that does not report a healthy status within a few seconds is stopped and the previous version restarted; the event is `update_failed` (or `rollback_failed`) with the reason. See `deploy/device-agent/README.md`.
 
 ## 5. Delivery settings
 
@@ -222,7 +223,7 @@ Fields are the same as the update command. `target_version` here is the version 
 1. **Heartbeat fields.** Are version, status, error count, and timestamp enough? Anything else the agent can report cheaply (uptime, CPU)? If so, a column is added to `heartbeats` before data is collected.
 2. **Heartbeat interval.** Is every 5 seconds acceptable? A shorter interval speeds up failure detection but increases message volume at 50 or more devices.
 3. **Error count meaning.** Errors since the last heartbeat (as written here) or a running total? The orchestrator's threshold logic depends on the answer.
-4. **Commands while busy.** Ignore or queue a command that arrives mid-update?
+4. **Commands while busy.** ~~Ignore or queue a command that arrives mid-update?~~ Decided: queue (section 4.4).
 5. **Offline catch-up.** If a device is disconnected when a command is sent, should it get the command on reconnect? This needs a persistent MQTT session. It is not required for Iteration 1 and can wait.
 6. **Last will message.** Should the broker announce a device that drops off without a goodbye? Missed heartbeats already cover this, so it is optional.
 
@@ -250,3 +251,4 @@ The first terminal should print the topic and the message. This is also the easi
 |---|---|---|
 | Iteration 1 | Initial draft | (pending review) |
 | 2026-11-04 | Stricter validation: UTC-only timestamps, integer ranges, exact-match IDs and versions | (pending review) |
+| 2026-11-11 | Device behavior rules settled with the device update logic: queue commands while busy, `already running` answer, `invalid command` answer, revert when new firmware does not start | (pending review) |

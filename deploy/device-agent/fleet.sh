@@ -12,7 +12,6 @@
 # Options for up:
 #   --host H        broker address (default: MQTT_HOST in .env, else host.docker.internal)
 #   --port P        broker port (default: MQTT_PORT in .env, else 1883)
-#   --version V     firmware version the devices report (default 1.0)
 #   --batch B       devices started per batch (default 5)
 #   --pause S       seconds between batches (default 2)
 #   --force         allow more than 50 devices
@@ -104,13 +103,11 @@ valid_id() { [[ "$1" =~ $DEVICE_ID_RE ]] || die "Device IDs look like device-001
 
 cmd_up() {
     local count=10 batch=5 pause=2 force=0 build=1
-    local version=${FIRMWARE_VERSION:-1.0}
     local host=${MQTT_HOST:-host.docker.internal} port=${MQTT_PORT:-1883}
     while (($#)); do
         case "$1" in
             --host) host=$2; shift ;;
             --port) port=$2; shift ;;
-            --version) version=$2; shift ;;
             --batch) batch=$2; shift ;;
             --pause) pause=$2; shift ;;
             --force) force=1 ;;
@@ -140,8 +137,8 @@ cmd_up() {
     done
     ((${#removed[@]})) && info "Removed ${#removed[@]} device(s) above $count: ${removed[*]}"
 
-    printf '%sStarting %d devices%s (broker %s:%s, firmware %s, %d per batch)\n' \
-        "$BOLD" "$count" "$RESET" "$host" "$port" "$version" "$batch"
+    printf '%sStarting %d devices%s (broker %s:%s, factory firmware 1.0, %d per batch)\n' \
+        "$BOLD" "$count" "$RESET" "$host" "$port" "$batch"
     local i id started=0 in_batch=0 state
     for ((i = 1; i <= count; i++)); do
         id=$(device_id_of "$i")
@@ -155,7 +152,6 @@ cmd_up() {
                     --add-host host.docker.internal:host-gateway \
                     --log-opt max-size=5m --log-opt max-file=2 \
                     -e DEVICE_ID="$id" -e MQTT_HOST="$host" -e MQTT_PORT="$port" \
-                    -e FIRMWARE_VERSION="$version" \
                     -e HEARTBEAT_INTERVAL_SECONDS="${HEARTBEAT_INTERVAL_SECONDS:-5}" \
                     -e LOG_LEVEL="${LOG_LEVEL:-INFO}" \
                     "$IMAGE" >/dev/null || die "Could not start $id."
