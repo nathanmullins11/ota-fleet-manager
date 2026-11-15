@@ -115,7 +115,7 @@ To test with a simulated device, see `device-agent/README.md`.
 
 Settings are environment variables (see `orchestrator/config.py` and `.env.example`): `MQTT_HOST`, `DB_HOST`, `HEARTBEAT_TIMEOUT_SECONDS`, `REGISTRY_PUBLIC_URL`, `COMMAND_TIMEOUT_SECONDS`, `LOG_LEVEL`, and others.
 
-## Run a rollout (manual update and rollback)
+## Run a rollout (update, health check, automatic rollback)
 
 Rollouts are started from the CLI inside the orchestrator container. The CLI only records the request in the database; the running orchestrator sends the commands within about a second, follows the devices' events, and logs every decision with its reason (`docker compose logs -f orchestrator`).
 
@@ -123,6 +123,7 @@ Rollouts are started from the CLI inside the orchestrator container. The CLI onl
 docker compose exec orchestrator python cli.py versions                  # firmware in the registry
 docker compose exec orchestrator python cli.py devices                   # fleet, with previous versions
 docker compose exec orchestrator python cli.py rollout start 2.0 --all   # or --devices device-001,device-002
+docker compose exec orchestrator python cli.py rollout start 2.1 --all --max-errors 50 --health-window 30
 docker compose exec orchestrator python cli.py rollout status --watch    # latest rollout, live
 docker compose exec orchestrator python cli.py rollout rollback 1        # send rollout 1's devices back
 docker compose exec orchestrator python cli.py rollout list
@@ -133,9 +134,30 @@ docker compose exec orchestrator python cli.py rollout list
 - One rollout at a time. A new one is refused while another is `pending`, `in_progress` or `halted`.
 - Offline devices are skipped (a command sent now would never reach them), and devices already on the target version get no command. Both are listed when the rollout is created and recorded in its `started` decision.
 - The rollback version defaults to the version the commanded devices run now; if they run different versions, give it with `--rollback-to`.
-- A device that does not answer a command within `COMMAND_TIMEOUT_SECONDS` (default 120) is marked `failed`, so a rollout always finishes.
-- A rollout is `completed` once every device has answered, even if some failed. Rolling back is your decision for now; Iteration 3 makes it automatic.
-- `rollback` works on `in_progress` and `completed` rollouts and sends every device in the rollout back to its rollback version.
+- A device that does not answer a command within `COMMAND_TIMEOUT_SECONDS` (default 120) is marked `failed`, so a rollout always finishes. If it kept sending heartbeats it is `no_reply` (an agent problem, counted as a failed update); if it went silent it is `not_reached` (offline, never a reason to roll back).
+- `rollback` works on `in_progress` and `completed` rollouts and sends every device in the rollout back to its rollback version. You can still roll back by hand; the health rules below do it automatically.
+
+**Health evaluation and automatic rollback (FR-4, FR-5).** After a device reports `update_succeeded`, the orchestrator watches it for a health window and gives it a verdict, shown in `rollout status` and recorded in the decision log:
+
+| Verdict | When | Rolls back? |
+|---|---|---|
+| `healthy` | The window passed within the limits, and the device is still heard from | No |
+| `unhealthy` | More firmware crashes or errors than allowed within the window | **Yes** |
+| `unresponsive` | Updated, then no heartbeat for longer than allowed (boot loop, broken agent) | **Yes** |
+| `failed_update` / `no_reply` | Reported `update_failed`, or heartbeats but no reply to the command | **Yes**, once more devices than allowed fail |
+| `not_reached` | No heartbeat and no reply after the command: offline | No |
+
+The first verdict that crosses a limit halts the rollout and rolls every device in it back, with a reason like `automatic: device-003 unhealthy: crashed 1 time within 18 s of updating to 2.1 (limit 0)`. A rollout is `completed` only when every updated device has been judged `healthy`. A short drop in heartbeats inside the window is not a failure, as long as the device is back within the silence limit.
+
+| Limit | Setting (default) | Per rollout |
+|---|---|---|
+| Health window | `HEALTH_WINDOW_SECONDS` (60) | `--health-window` |
+| Crashes per device | `HEALTH_MAX_CRASHES` (0) | `--max-crashes` |
+| Errors per device | `HEALTH_MAX_ERRORS` (10) | `--max-errors` |
+| Failed installs | `HEALTH_MAX_FAILED_DEVICES` (0) | `--max-failed` |
+| Silence after updating | `HEALTH_UNRESPONSIVE_SECONDS` (45) | `--unresponsive` |
+
+The settings go in `.env`; the limits a rollout is judged by are stored with it, so its decisions can always be explained later. The rules are in `orchestrator/rollout_logic.py` (`evaluate_device`, `health_decision`).
 
 Each device gets its own command on `ota/devices/{id}/commands`; there is no broadcast topic. Commands carry download URLs built from `REGISTRY_PUBLIC_URL`, the registry address **as the devices see it**: the default `http://host.docker.internal:8080` suits devices on the same machine; on the cloud VM set it to `http://<elastic-ip>:8080` in `.env` (`demo/cloud/control-plane.sh` does this for you).
 

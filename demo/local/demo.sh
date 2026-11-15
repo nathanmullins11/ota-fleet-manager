@@ -44,6 +44,9 @@ export POSTGRES_PASSWORD="demo-$RANDOM$RANDOM"
 # Devices that never answer a command are marked failed after this; short, so a missing
 # device feature does not hold up the next step for two minutes.
 export COMMAND_TIMEOUT_SECONDS=30
+# Each updated device is watched this long before the rollout counts as healthy; shorter than
+# the orchestrator's default (60 s) so the demo moves on quickly. 2.1 crashes within it.
+export HEALTH_WINDOW_SECONDS=20
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 

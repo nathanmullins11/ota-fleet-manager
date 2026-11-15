@@ -19,6 +19,17 @@ class Config:
     registry_public_url: str         # how devices reach it; goes into command URLs
     command_timeout_seconds: int     # no event from a commanded device for this long -> failed
     log_level: str
+    # Default health limits for rollouts (rollout_logic.HealthLimits); cli.py can override.
+    health_window_seconds: int = 60
+    max_crashes: int = 0
+    max_errors: int = 10
+    max_failed_devices: int = 0
+    unresponsive_seconds: int = 45
+
+    def health_limits(self):
+        from rollout_logic import HealthLimits
+        return HealthLimits(self.health_window_seconds, self.max_crashes, self.max_errors,
+                            self.max_failed_devices, self.unresponsive_seconds)
 
 
 def load_config() -> Config:
@@ -42,4 +53,9 @@ def load_config() -> Config:
             "REGISTRY_PUBLIC_URL", "http://host.docker.internal:8080").rstrip("/"),
         command_timeout_seconds=int(os.environ.get("COMMAND_TIMEOUT_SECONDS", "120")),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        health_window_seconds=int(os.environ.get("HEALTH_WINDOW_SECONDS", "60")),
+        max_crashes=int(os.environ.get("HEALTH_MAX_CRASHES", "0")),
+        max_errors=int(os.environ.get("HEALTH_MAX_ERRORS", "10")),
+        max_failed_devices=int(os.environ.get("HEALTH_MAX_FAILED_DEVICES", "0")),
+        unresponsive_seconds=int(os.environ.get("HEALTH_UNRESPONSIVE_SECONDS", "45")),
     )

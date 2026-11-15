@@ -82,6 +82,12 @@ services:
       # The registry address as devices see it; it goes into update and rollback commands.
       REGISTRY_PUBLIC_URL: ${REGISTRY_PUBLIC_URL:-http://host.docker.internal:8080}
       COMMAND_TIMEOUT_SECONDS: ${COMMAND_TIMEOUT_SECONDS:-120}
+      # Default health limits for rollouts (cli.py rollout start can override them).
+      HEALTH_WINDOW_SECONDS: ${HEALTH_WINDOW_SECONDS:-60}
+      HEALTH_MAX_CRASHES: ${HEALTH_MAX_CRASHES:-0}
+      HEALTH_MAX_ERRORS: ${HEALTH_MAX_ERRORS:-10}
+      HEALTH_MAX_FAILED_DEVICES: ${HEALTH_MAX_FAILED_DEVICES:-0}
+      HEALTH_UNRESPONSIVE_SECONDS: ${HEALTH_UNRESPONSIVE_SECONDS:-45}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       mosquitto:

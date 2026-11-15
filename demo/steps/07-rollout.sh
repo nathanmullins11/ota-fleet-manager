@@ -15,8 +15,11 @@ if [[ "$SIMULATE" == 1 ]]; then
     # ----------------------------------------------------------------------------- update
     if [[ "$CP_LOCAL" == 1 ]]; then
         say "Starting a rollout of firmware 2.0 to every online device:"
-        run_note "python cli.py rollout start 2.0 --all"
-        cli rollout start 2.0 --all 2>&1 | grep -v -E "^$|Follow it|cli.py rollout status" | indent
+        # --max-failed: the simulated failure below must not halt the rollout automatically,
+        # so this path still shows the operator's manual rollback.
+        run_note "python cli.py rollout start 2.0 --all --max-failed 99"
+        cli rollout start 2.0 --all --max-failed 99 2>&1 \
+            | grep -v -E "^$|Follow it|cli.py rollout status|health limits" | indent
     else
         look_at_vm "press ${BOLD}u${RESET}${CYAN} in the live view to start a rollout of 2.0 to every online device."
     fi
@@ -191,6 +194,13 @@ if begin_rollout 2.0 u "update every online device to 2.0" --all; then
         else
             check_fail "rollout $RID: only ${updated:-0} of ${#ROLLOUT_TARGETS[@]} devices updated" \
                        "devices without a reply are marked failed after the command timeout"
+        fi
+        healthy=$(cp_psql -Atc "SELECT count(*) FROM rollout_devices WHERE rollout_id = $RID AND verdict = 'healthy';")
+        if [[ "$healthy" == "${#ROLLOUT_TARGETS[@]}" ]]; then
+            check_pass "Every device was judged healthy after its ${HEALTH_WINDOW_SECONDS:-60} s health window, so the rollout completed (no automatic rollback)"
+        else
+            check_fail "only ${healthy:-0} of ${#ROLLOUT_TARGETS[@]} devices were judged healthy" \
+                       "$(cp_psql -Atc "SELECT string_agg(device_id || ' ' || coalesce(verdict, 'no verdict'), ', ') FROM rollout_devices WHERE rollout_id = $RID;")"
         fi
     else
         look_at_vm "the Current rollout panel shows rollout $RID: every device updated, then COMPLETED."
