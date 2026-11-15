@@ -78,7 +78,13 @@ CREATE TABLE rollouts (
     current_stage    INTEGER NOT NULL DEFAULT 0,
     halt_reason      TEXT,
     started_at       TIMESTAMPTZ,
-    ended_at         TIMESTAMPTZ
+    ended_at         TIMESTAMPTZ,
+    -- Health limits this rollout is judged by (NULL: the orchestrator's defaults).
+    health_window_seconds INTEGER,      -- watch each device this long after it updates
+    max_crashes           INTEGER,      -- firmware crashes allowed per device in the window
+    max_errors            INTEGER,      -- firmware errors allowed per device in the window
+    max_failed_devices    INTEGER,      -- failed installs allowed before the rollout halts
+    unresponsive_seconds  INTEGER       -- silence after updating that counts as unresponsive
 );
 
 -- Per-device outcome within a rollout. Used for "percent of fleet exposed".
@@ -88,6 +94,13 @@ CREATE TABLE rollout_devices (
     state       TEXT   NOT NULL DEFAULT 'pending'
         CHECK (state IN ('pending', 'commanded', 'updated', 'failed', 'rolled_back')),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    window_started_at TIMESTAMPTZ,      -- update_succeeded arrived: health window starts
+    verdict     TEXT                    -- health evaluation result (rollout_logic.py)
+        CONSTRAINT rollout_devices_verdict_check
+        CHECK (verdict IN ('healthy', 'unhealthy', 'unresponsive', 'failed_update',
+                           'no_reply', 'not_reached')),
+    verdict_reason TEXT,
+    verdict_at  TIMESTAMPTZ,
     PRIMARY KEY (rollout_id, device_id)
 );
 
@@ -96,8 +109,9 @@ CREATE TABLE rollout_events (
     id          BIGSERIAL PRIMARY KEY,
     rollout_id  BIGINT NOT NULL REFERENCES rollouts(id) ON DELETE CASCADE,
     event       TEXT NOT NULL
+        CONSTRAINT rollout_events_event_check
         CHECK (event IN ('started', 'stage_advanced', 'halted', 'rollback_started',
-                         'rollback_completed', 'completed')),
+                         'rollback_completed', 'completed', 'device_verdict')),
     stage       INTEGER,
     reason      TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()

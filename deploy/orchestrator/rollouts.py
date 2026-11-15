@@ -1,7 +1,8 @@
 """Rollouts: database records and the commands that go with them.
 
 RolloutStore holds the SQL. cli.py uses it to create rollouts and request rollbacks;
-the orchestrator's main loop (RolloutRunner) is the only part that publishes commands.
+the orchestrator's main loop (RolloutRunner) is the only part that publishes commands
+and the only part that judges device health and rolls back automatically.
 Every decision is logged with its reason (NF-5) and recorded in rollout_events.
 """
 import json
@@ -13,8 +14,10 @@ import paho.mqtt.client as mqtt
 from db import Database
 from messages import Event
 from registry import FirmwareVersion
-from rollout_logic import (ACTIVE_STATES, DeviceRow, RolloutError, TargetPlan, apply_event,
-                           build_command, check_can_roll_back, check_can_start, outcome)
+from rollout_logic import (ACTIVE_STATES, DeviceHealth, DeviceRow, HealthLimits, RolloutError,
+                           TargetPlan, apply_event, build_command, check_can_roll_back,
+                           check_can_start, classify_no_answer, evaluate_device,
+                           health_decision, outcome)
 from topics import command_topic
 
 log = logging.getLogger("orchestrator.rollouts")
@@ -73,6 +76,25 @@ class RolloutStore:
             "  FROM rollouts r LEFT JOIN rollout_devices d ON d.rollout_id = r.id "
             " GROUP BY r.id ORDER BY r.id DESC LIMIT %s", (limit,)).fetchall())
 
+    def limits(self, rollout_id: int, defaults: HealthLimits) -> HealthLimits:
+        """The health limits stored with a rollout; missing values (older rollouts) use
+        the defaults."""
+        row = self.db.run(lambda conn: conn.execute(
+            "SELECT health_window_seconds, max_crashes, max_errors, max_failed_devices, "
+            "       unresponsive_seconds FROM rollouts WHERE id = %s", (rollout_id,)).fetchone())
+        if row is None:
+            return defaults
+        return defaults.with_overrides(
+            window_seconds=row[0], max_crashes=row[1], max_errors=row[2],
+            max_failed_devices=row[3], unresponsive_seconds=row[4])
+
+    def device_verdicts(self, rollout_id: int) -> dict:
+        """device_id -> (verdict, reason) for devices that have a verdict."""
+        rows = self.db.run(lambda conn: conn.execute(
+            "SELECT device_id, verdict, verdict_reason FROM rollout_devices "
+            " WHERE rollout_id = %s AND verdict IS NOT NULL", (rollout_id,)).fetchall())
+        return {d: (v, r) for d, v, r in rows}
+
     def device_states(self, rollout_id: int) -> dict:
         rows = self.db.run(lambda conn: conn.execute(
             "SELECT device_id, state FROM rollout_devices WHERE rollout_id = %s",
@@ -81,7 +103,8 @@ class RolloutStore:
 
     def device_details(self, rollout_id: int) -> list[tuple]:
         return self.db.run(lambda conn: conn.execute(
-            "SELECT rd.device_id, rd.state, d.current_version, d.status, rd.updated_at "
+            "SELECT rd.device_id, rd.state, d.current_version, d.status, rd.verdict, "
+            "       rd.verdict_reason, rd.updated_at "
             "  FROM rollout_devices rd JOIN devices d USING (device_id) "
             " WHERE rd.rollout_id = %s ORDER BY rd.device_id", (rollout_id,)).fetchall())
 
@@ -92,8 +115,11 @@ class RolloutStore:
 
     # ----------------------------------------------------------------- requests (cli.py)
 
-    def create_rollout(self, target_version: str, plan: TargetPlan, origin: str) -> int:
-        """Record a pending rollout; the orchestrator sends the commands."""
+    def create_rollout(self, target_version: str, plan: TargetPlan, origin: str,
+                       limits: Optional[HealthLimits] = None) -> int:
+        """Record a pending rollout and the health limits it is judged by; the orchestrator
+        sends the commands."""
+        limits = limits or HealthLimits()
         def work(conn):
             with conn.transaction():
                 # Serializes concurrent creates, so "one active rollout" holds.
@@ -103,14 +129,19 @@ class RolloutStore:
                     (list(ACTIVE_STATES),)).fetchall()
                 check_can_start(active)
                 rid = conn.execute(
-                    "INSERT INTO rollouts (target_version, rollback_version) VALUES (%s, %s) "
-                    "RETURNING id", (target_version, plan.rollback_version)).fetchone()[0]
+                    "INSERT INTO rollouts (target_version, rollback_version, "
+                    "  health_window_seconds, max_crashes, max_errors, max_failed_devices, "
+                    "  unresponsive_seconds) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (target_version, plan.rollback_version, limits.window_seconds,
+                     limits.max_crashes, limits.max_errors, limits.max_failed_devices,
+                     limits.unresponsive_seconds)).fetchone()[0]
                 for device_id in plan.to_command:
                     conn.execute("INSERT INTO rollout_devices (rollout_id, device_id) "
                                  "VALUES (%s, %s)", (rid, device_id))
                 conn.execute(
                     "INSERT INTO rollout_events (rollout_id, event, stage, reason) "
-                    "VALUES (%s, 'started', 0, %s)", (rid, _start_reason(origin, target_version, plan)))
+                    "VALUES (%s, 'started', 0, %s)",
+                    (rid, _start_reason(origin, target_version, plan, limits)))
                 return rid
         return self.db.run(work)
 
@@ -130,9 +161,9 @@ class RolloutStore:
         self.db.run(work)
 
 
-def _start_reason(origin: str, target: str, plan: TargetPlan) -> str:
+def _start_reason(origin: str, target: str, plan: TargetPlan, limits: HealthLimits) -> str:
     parts = [f"{origin}: update to {target} for {len(plan.to_command)} device(s)",
-             f"rollback version {plan.rollback_version}"]
+             f"rollback version {plan.rollback_version}", f"health: {limits.describe()}"]
     if plan.skipped_offline:
         parts.append(f"skipped offline: {', '.join(plan.skipped_offline)}")
     if plan.already_on_target:
@@ -148,18 +179,21 @@ class RolloutRunner:
     """
 
     def __init__(self, store: RolloutStore, client: mqtt.Client, public_url: str,
-                 command_timeout_seconds: int):
+                 command_timeout_seconds: int, limits: Optional[HealthLimits] = None):
         self.store = store
         self.client = client
         self.public_url = public_url
         self.timeout = command_timeout_seconds
+        self.default_limits = limits or HealthLimits()   # for rollouts that stored none
 
     # ----------------------------------------------------------------- main loop
 
     def tick(self) -> None:
         self._send_updates()
-        self._send_rollbacks()
         self._expire_commands()
+        self._evaluate_health()
+        self._apply_health_rules()
+        self._send_rollbacks()          # same tick as an automatic halt
         self._finish_rollouts()
 
     def _send_updates(self) -> None:
@@ -214,16 +248,100 @@ class RolloutRunner:
                 self._publish(rid, device_id, "rollback", version, sha)
 
     def _expire_commands(self) -> None:
-        rows = self.store.db.run(lambda conn: _in_txn(conn, lambda: conn.execute(
-            "UPDATE rollout_devices rd SET state = 'failed', updated_at = now() "
-            "  FROM rollouts r "
-            " WHERE rd.rollout_id = r.id AND r.state IN ('in_progress', 'halted') "
-            "   AND rd.state = 'commanded' "
-            "   AND rd.updated_at < now() - make_interval(secs => %s) "
-            "RETURNING rd.rollout_id, rd.device_id", (self.timeout,)).fetchall()))
-        for rid, device_id in rows:
-            log.warning("Rollout %d: %s failed (no response within %ss)",
-                        rid, device_id, self.timeout)
+        """Commanded devices that sent no event in time are failed. In the update phase they
+        also get a verdict: heartbeats but no reply (no_reply, counts as a failed update) or
+        silent (not_reached: offline, which never triggers a rollback)."""
+        def work(conn):
+            with conn.transaction():
+                rows = conn.execute(
+                    "SELECT rd.rollout_id, rd.device_id, r.state, "
+                    "       (SELECT count(*) FROM heartbeats h WHERE h.device_id = rd.device_id "
+                    "          AND h.received_at > rd.updated_at) "
+                    "  FROM rollout_devices rd JOIN rollouts r ON r.id = rd.rollout_id "
+                    " WHERE r.state IN ('in_progress', 'halted') AND rd.state = 'commanded' "
+                    "   AND rd.updated_at < now() - make_interval(secs => %s) "
+                    "   FOR UPDATE OF rd", (self.timeout,)).fetchall()
+                expired = []
+                for rid, device_id, r_state, beats in rows:
+                    verdict = reason = None
+                    if r_state == "in_progress":
+                        verdict, reason = classify_no_answer(beats, self.timeout)
+                    conn.execute(
+                        "UPDATE rollout_devices SET state = 'failed', updated_at = now(), "
+                        "       verdict = COALESCE(%s, verdict), "
+                        "       verdict_reason = COALESCE(%s, verdict_reason), "
+                        "       verdict_at = CASE WHEN %s::text IS NULL THEN verdict_at ELSE now() END "
+                        " WHERE rollout_id = %s AND device_id = %s",
+                        (verdict, reason, verdict, rid, device_id))
+                    if verdict:
+                        _record_verdict(conn, rid, device_id, verdict, reason)
+                    expired.append((rid, device_id, verdict, reason))
+                return expired
+
+        for rid, device_id, verdict, reason in self.store.db.run(work):
+            if verdict:
+                log.warning("Rollout %d: %s %s: %s", rid, device_id, verdict, reason)
+            else:
+                log.warning("Rollout %d: %s failed (no response within %ss)",
+                            rid, device_id, self.timeout)
+
+    def _evaluate_health(self) -> None:
+        """Give each updated device in its health window a verdict once it has one (FR-4)."""
+        rows = self.store.db.run(lambda conn: conn.execute(
+            "SELECT rd.rollout_id, rd.device_id, r.target_version, "
+            "       EXTRACT(EPOCH FROM now() - rd.window_started_at), "
+            "       COALESCE((SELECT sum(h.crash_count) FROM heartbeats h "
+            "                  WHERE h.device_id = rd.device_id "
+            "                    AND h.received_at > rd.window_started_at), 0), "
+            "       COALESCE((SELECT sum(h.error_count) FROM heartbeats h "
+            "                  WHERE h.device_id = rd.device_id "
+            "                    AND h.received_at > rd.window_started_at), 0), "
+            "       EXTRACT(EPOCH FROM now() - d.last_heartbeat) "
+            "  FROM rollout_devices rd JOIN rollouts r ON r.id = rd.rollout_id "
+            "  JOIN devices d ON d.device_id = rd.device_id "
+            " WHERE r.state = 'in_progress' AND rd.state = 'updated' AND rd.verdict IS NULL "
+            "   AND rd.window_started_at IS NOT NULL").fetchall())
+        limits_cache = {}
+        for rid, device_id, version, since_update, crashes, errors, silent in rows:
+            if rid not in limits_cache:
+                limits_cache[rid] = self.store.limits(rid, self.default_limits)
+            health = DeviceHealth(device_id, version, float(since_update), int(crashes),
+                                  int(errors), None if silent is None else float(silent))
+            result = evaluate_device(health, limits_cache[rid])
+            if result is None:
+                continue
+            verdict, reason = result
+
+            def work(conn, rid=rid, device_id=device_id, verdict=verdict, reason=reason):
+                with conn.transaction():
+                    changed = conn.execute(
+                        "UPDATE rollout_devices SET verdict = %s, verdict_reason = %s, "
+                        "       verdict_at = now() "
+                        " WHERE rollout_id = %s AND device_id = %s AND verdict IS NULL",
+                        (verdict, reason, rid, device_id)).rowcount
+                    if changed:
+                        _record_verdict(conn, rid, device_id, verdict, reason)
+                    return changed
+
+            if self.store.db.run(work):
+                (log.info if verdict == "healthy" else log.warning)(
+                    "Rollout %d: %s %s: %s", rid, device_id, verdict, reason)
+
+    def _apply_health_rules(self) -> None:
+        """Halt and roll back a rollout whose verdicts break its limits (FR-5)."""
+        rids = [r[0] for r in self.store.db.run(lambda conn: conn.execute(
+            "SELECT id FROM rollouts WHERE state = 'in_progress'").fetchall())]
+        for rid in rids:
+            reason = health_decision(self.store.device_verdicts(rid),
+                                     self.store.limits(rid, self.default_limits))
+            if reason is None:
+                continue
+            try:
+                self.store.request_rollback(rid, reason)
+            except RolloutError as exc:          # finished or halted meanwhile
+                log.info("Rollout %d: automatic rollback not needed (%s)", rid, exc)
+                continue
+            log.warning("Rollout %d halted: %s", rid, reason)
 
     def _finish_rollouts(self) -> None:
         rows = self.store.db.run(lambda conn: conn.execute(
@@ -231,7 +349,9 @@ class RolloutRunner:
             "   OR (state = 'halted' AND EXISTS (SELECT 1 FROM rollout_events e "
             "       WHERE e.rollout_id = r.id AND e.event = 'rollback_started'))").fetchall())
         for rid, state in rows:
-            result = outcome(state, self.store.device_states(rid))
+            verdicts = {d: v for d, (v, _) in self.store.device_verdicts(rid).items()}
+            result = outcome(state, self.store.device_states(rid),
+                             verdicts if state == "in_progress" else None)
             if result is None:
                 continue
             new_state, event, reason = result
@@ -297,9 +417,22 @@ class RolloutRunner:
                         " WHERE rollout_id = %s AND device_id = %s",
                         (new_state, ev.rollout_id, ev.device_id))
                     if new_state == "updated":
+                        # The health window starts now (rollout_logic.evaluate_device).
+                        conn.execute("UPDATE rollout_devices SET window_started_at = now() "
+                                     " WHERE rollout_id = %s AND device_id = %s",
+                                     (ev.rollout_id, ev.device_id))
                         conn.execute("UPDATE devices SET previous_version = %s, "
                                      "updated_at = now() WHERE device_id = %s",
                                      (rollback, ev.device_id))
+                    elif new_state == "failed" and r_state == "in_progress":
+                        reason = ev.reason or "update failed"
+                        conn.execute(
+                            "UPDATE rollout_devices SET verdict = 'failed_update', "
+                            "       verdict_reason = %s, verdict_at = now() "
+                            " WHERE rollout_id = %s AND device_id = %s",
+                            (reason, ev.rollout_id, ev.device_id))
+                        _record_verdict(conn, ev.rollout_id, ev.device_id, "failed_update",
+                                        reason)
                 return new_state, None
 
         new_state, ignored = self.store.db.run(work)
@@ -313,6 +446,13 @@ class RolloutRunner:
         else:
             log.info("Rollout %d: %s reported %s for %s%s",
                      ev.rollout_id, ev.device_id, ev.event, ev.version, suffix)
+
+
+def _record_verdict(conn, rid: int, device_id: str, verdict: str, reason: str) -> None:
+    """A device verdict in the decision log (NF-5)."""
+    conn.execute("INSERT INTO rollout_events (rollout_id, event, stage, reason) "
+                 "SELECT %s, 'device_verdict', current_stage, %s FROM rollouts WHERE id = %s",
+                 (rid, f"{device_id} {verdict}: {reason}", rid))
 
 
 def _in_txn(conn, fn):

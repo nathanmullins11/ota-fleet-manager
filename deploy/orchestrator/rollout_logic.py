@@ -4,13 +4,27 @@ and deciding when a rollout is finished. rollouts.py does the database and MQTT 
 Rollout life cycle (rollouts.state):
 
   pending      created by cli.py; the orchestrator has not sent commands yet
-  in_progress  update commands sent; waiting for device events
-  completed    every device answered (updated or failed); nothing more to send
-  halted       rollback requested (manually now, automatically in Iteration 3)
+  in_progress  update commands sent; waiting for device events and health verdicts
+  completed    every device failed or updated and was judged healthy
+  halted       rollback requested, by an operator or automatically by the health rules
   rolled_back  rollback commands answered by every device
 
 Per device (rollout_devices.state): pending -> commanded -> updated | failed, and after a
 rollback request: commanded -> rolled_back | failed.
+
+Health evaluation (FR-4, FR-5): each updated device is watched for a health window and
+gets a verdict (rollout_devices.verdict). An unhealthy or unresponsive device, or more
+failed installs than allowed, halts the rollout and rolls it back automatically:
+
+  healthy        stayed within the limits for the whole window, and is still heard from
+  unhealthy      more crashes or errors than allowed within the window
+  unresponsive   updated, then went silent for longer than allowed (boot loop, broken agent)
+  failed_update  reported update_failed (download, verification or start failed)
+  no_reply       kept sending heartbeats but never answered the command (agent problem)
+  not_reached    sent no heartbeat after the command: offline, not a firmware failure
+
+Only unhealthy, unresponsive, and failed_update or no_reply beyond the allowed number,
+trigger a rollback. A device that is merely offline (not_reached) never does.
 """
 from collections import Counter
 from dataclasses import dataclass
@@ -51,6 +65,90 @@ class TargetPlan:
     already_on_target: list     # running the target version already: no command
     skipped_offline: list       # offline or never heard from: a command would be lost
     rollback_version: str
+
+
+@dataclass(frozen=True)
+class HealthLimits:
+    """The limits a rollout is judged by. Defaults come from the orchestrator's settings;
+    cli.py can override them per rollout, and they are stored with it."""
+    window_seconds: int = 60          # watch each device this long after it updates
+    max_crashes: int = 0              # per device, within the window
+    max_errors: int = 10              # per device, within the window
+    max_failed_devices: int = 0       # failed_update + no_reply allowed before halting
+    unresponsive_seconds: int = 45    # silence after updating that counts as unresponsive
+
+    def describe(self) -> str:
+        return (f"window {self.window_seconds} s, crashes <= {self.max_crashes}, "
+                f"errors <= {self.max_errors}, failed devices <= {self.max_failed_devices}, "
+                f"silence <= {self.unresponsive_seconds} s")
+
+    def with_overrides(self, **values) -> "HealthLimits":
+        """Replace the fields given (None means keep), checking they are not negative."""
+        fields = {k: v for k, v in values.items() if v is not None}
+        for key, value in fields.items():
+            if type(value) is not int or value < 0:
+                raise RolloutError(f"{key} must be a whole number of 0 or more")
+        return HealthLimits(**{**self.__dict__, **fields})
+
+
+@dataclass(frozen=True)
+class DeviceHealth:
+    """What the orchestrator knows about an updated device in its health window."""
+    device_id: str
+    version: str                              # the version it updated to
+    seconds_since_update: float               # since update_succeeded arrived
+    crashes: int                              # summed over heartbeats since then
+    errors: int
+    seconds_since_heartbeat: Optional[float]  # None: never heard from
+
+
+BAD_VERDICTS = ("unhealthy", "unresponsive")
+FAILED_VERDICTS = ("failed_update", "no_reply")
+
+
+def _times(n: int) -> str:
+    return f"{n} time" if n == 1 else f"{n} times"
+
+
+def evaluate_device(h: DeviceHealth, limits: HealthLimits) -> Optional[tuple[str, str]]:
+    """A device's verdict and its reason, or None while it is still being watched."""
+    within = f"within {h.seconds_since_update:.0f} s of updating to {h.version}"
+    if h.crashes > limits.max_crashes:
+        return "unhealthy", f"crashed {_times(h.crashes)} {within} (limit {limits.max_crashes})"
+    if h.errors > limits.max_errors:
+        return "unhealthy", f"reported {h.errors} errors {within} (limit {limits.max_errors})"
+    silent = h.seconds_since_heartbeat
+    if silent is not None and silent > limits.unresponsive_seconds:
+        return "unresponsive", (f"no heartbeat for {silent:.0f} s after updating to {h.version} "
+                                f"(limit {limits.unresponsive_seconds} s)")
+    if h.seconds_since_update >= limits.window_seconds and silent is not None:
+        crashes = f"{h.crashes} crash" + ("" if h.crashes == 1 else "es")
+        return "healthy", (f"within limits for {limits.window_seconds} s on {h.version}: "
+                           f"{crashes}, {h.errors} errors")
+    return None
+
+
+def classify_no_answer(heartbeats_since_command: int, timeout_seconds: int) -> tuple[str, str]:
+    """A commanded device that sent no event within the command timeout."""
+    if heartbeats_since_command:
+        return "no_reply", (f"sent {heartbeats_since_command} heartbeat(s) but no reply to the "
+                            f"update command within {timeout_seconds} s")
+    return "not_reached", f"no heartbeat or reply within {timeout_seconds} s of the command: offline"
+
+
+def health_decision(verdicts: dict, limits: HealthLimits) -> Optional[str]:
+    """Whether a rollout must halt. verdicts: device_id -> (verdict, reason) for devices that
+    have one. Returns the halt reason, or None."""
+    for device_id in sorted(verdicts):
+        verdict, reason = verdicts[device_id]
+        if verdict in BAD_VERDICTS:
+            return f"automatic: {device_id} {verdict}: {reason}"
+    failed = sorted(d for d, (v, _) in verdicts.items() if v in FAILED_VERDICTS)
+    if len(failed) > limits.max_failed_devices:
+        details = "; ".join(f"{d} ({verdicts[d][1]})" for d in failed)
+        return (f"automatic: {len(failed)} device(s) failed to update "
+                f"(limit {limits.max_failed_devices}): {details}")
+    return None
 
 
 def utc_now() -> str:
@@ -157,21 +255,31 @@ def apply_event(rollout_state: str, event: str, event_version: str, target_versi
     return table[event], None
 
 
-def outcome(rollout_state: str, device_states: dict) -> Optional[tuple[str, str, str]]:
-    """Whether a rollout is finished. device_states: device_id -> rollout_devices.state.
+def outcome(rollout_state: str, device_states: dict,
+            verdicts: Optional[dict] = None) -> Optional[tuple[str, str, str]]:
+    """Whether a rollout is finished. device_states: device_id -> rollout_devices.state;
+    verdicts: device_id -> rollout_devices.verdict (None: health is not evaluated).
 
     Returns (new rollout state, rollout_events.event, reason), or None if devices are still
-    pending or commanded.
+    pending or commanded, or updated devices are still in their health window.
     """
     if any(s in ("pending", "commanded") for s in device_states.values()):
         return None
     failed = sorted(d for d, s in device_states.items() if s == "failed")
     total = len(device_states)
     if rollout_state == "in_progress":
-        updated = sum(s == "updated" for s in device_states.values())
-        reason = f"{updated} of {total} devices updated"
+        updated = [d for d, s in device_states.items() if s == "updated"]
+        if verdicts is not None and any(verdicts.get(d) != "healthy" for d in updated):
+            return None                       # still watching (or about to halt)
+        reason = (f"{len(updated)} of {total} devices updated"
+                  + (" and healthy" if verdicts is not None else ""))
         if failed:
-            reason += f"; failed: {', '.join(failed)}"
+            not_reached = [d for d in failed if (verdicts or {}).get(d) == "not_reached"]
+            others = [d for d in failed if d not in not_reached]
+            if others:
+                reason += f"; failed: {', '.join(others)}"
+            if not_reached:
+                reason += f"; not reached (offline): {', '.join(not_reached)}"
         return "completed", "completed", reason
     if rollout_state == "halted":
         restored = sum(s == "rolled_back" for s in device_states.values())

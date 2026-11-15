@@ -114,6 +114,7 @@ def main() -> None:
     log.info("Starting orchestrator (heartbeat timeout %ss, command timeout %ss, "
              "devices download from %s)", cfg.heartbeat_timeout_seconds,
              cfg.command_timeout_seconds, cfg.registry_public_url)
+    log.info("Default health limits for rollouts: %s", cfg.health_limits().describe())
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -128,7 +129,8 @@ def main() -> None:
     event_runner = RolloutRunner(RolloutStore(mqtt_db), client, cfg.registry_public_url,
                                  cfg.command_timeout_seconds)
     store = RolloutStore(main_db)
-    runner = RolloutRunner(store, client, cfg.registry_public_url, cfg.command_timeout_seconds)
+    runner = RolloutRunner(store, client, cfg.registry_public_url, cfg.command_timeout_seconds,
+                           cfg.health_limits())
 
     if not connect_with_retry(client, cfg, stop):
         return

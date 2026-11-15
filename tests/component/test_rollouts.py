@@ -81,9 +81,15 @@ def add_devices(pg, *devices, version="1.0", status="healthy"):
                    "VALUES (%s, %s, %s, now())", (d, version, status))
 
 
-def start(store, logic, target, devices=None, rollback=None):
+def lenient(logic):
+    """Limits for the tests of rollout mechanics: no health window, failures tolerated."""
+    return logic.HealthLimits(window_seconds=0, max_crashes=99, max_errors=999,
+                              max_failed_devices=99, unresponsive_seconds=3600)
+
+
+def start(store, logic, target, devices=None, rollback=None, limits=None):
     plan = logic.plan_targets(store.devices(), target, devices, rollback)
-    return store.create_rollout(target, plan, "test")
+    return store.create_rollout(target, plan, "test", limits or lenient(logic))
 
 
 def event(msgs, device, name, rid, version, reason=None):
@@ -243,7 +249,7 @@ def test_events_move_devices_and_complete_the_rollout(store, logic, pg, runner, 
     runner.tick()
     r = store.rollout(rid)
     assert r["state"] == "completed" and r["ended_at"] is not None
-    assert events(store, rid)[-1] == ("completed", "1 of 2 devices updated; failed: device-002")
+    assert events(store, rid)[-1] == ("completed", "1 of 2 devices updated and healthy; failed: device-002")
 
 
 def test_rollout_waits_while_devices_are_commanded(store, logic, pg, runner, msgs):
@@ -390,3 +396,181 @@ def test_rollback_while_still_in_progress(store, logic, pg, runner, client, msgs
     runner.tick()
     assert sorted(d for d, _, _ in client.take()) == ["device-001", "device-002"]
     assert set(device_states(store, rid).values()) == {"commanded"}
+
+
+
+# --------------------------------------------------------------------------- health evaluation
+
+def strict(logic, **changes):
+    """The orchestrator's default limits (60 s window, no crashes, 10 errors, no failures)."""
+    return logic.HealthLimits().with_overrides(**changes)
+
+
+def heartbeat(pg, device, version="2.0", errors=0, crashes=0, status="healthy"):
+    pg.execute("INSERT INTO heartbeats (device_id, reported_version, status, error_count, "
+               "crash_count, reported_at) VALUES (%s, %s, %s, %s, %s, now())",
+               (device, version, status, errors, crashes))
+    pg.execute("UPDATE devices SET last_heartbeat = now() WHERE device_id = %s", (device,))
+
+
+def age_window(pg, rid, seconds):
+    pg.execute("UPDATE rollout_devices SET window_started_at = now() - make_interval(secs => %s) "
+               "WHERE rollout_id = %s", (seconds, rid))
+
+
+def verdicts(store, rid):
+    return {d: v for d, (v, _) in store.device_verdicts(rid).items()}
+
+
+def updated(store, logic, pg, runner, msgs, devices=("device-001", "device-002"), target="2.0",
+            **limits):
+    """A rollout whose devices all reported update_succeeded."""
+    add_devices(pg, *devices)
+    rid = start(store, logic, target, limits=strict(logic, **limits))
+    runner.tick()
+    for d in devices:
+        runner.on_event(event(msgs, d, "update_succeeded", rid, target))
+    return rid
+
+
+def test_limits_are_stored_with_the_rollout(store, logic, pg):
+    add_devices(pg, "device-001")
+    rid = start(store, logic, "2.0", limits=strict(logic, max_errors=50, window_seconds=30))
+    stored = store.limits(rid, logic.HealthLimits())
+    assert (stored.max_errors, stored.window_seconds, stored.max_crashes) == (50, 30, 0)
+    assert "health: window 30 s, crashes <= 0, errors <= 50" in events(store, rid)[0][1]
+
+
+def test_devices_are_watched_until_the_window_passes(store, logic, pg, runner, msgs):
+    rid = updated(store, logic, pg, runner, msgs)
+    runner.tick()
+    assert verdicts(store, rid) == {} and rollout_state(pg, rid) == "in_progress"
+
+    age_window(pg, rid, 61)
+    runner.tick()
+    assert verdicts(store, rid) == {"device-001": "healthy", "device-002": "healthy"}
+    assert rollout_state(pg, rid) == "completed"
+    assert events(store, rid)[-1] == ("completed", "2 of 2 devices updated and healthy")
+
+
+def test_a_crash_rolls_back_automatically(store, logic, pg, runner, client, msgs):
+    rid = updated(store, logic, pg, runner, msgs, target="2.1")
+    client.take()
+    heartbeat(pg, "device-002", "2.1", errors=5, crashes=1, status="unhealthy")
+    runner.tick()
+
+    r = store.rollout(rid)
+    assert r["state"] == "halted"
+    assert r["halt_reason"].startswith("automatic: device-002 unhealthy: crashed 1 time within")
+    assert r["halt_reason"].endswith("of updating to 2.1 (limit 0)")
+    # Rollback commands go out in the same tick, to every device of the rollout.
+    assert sorted((d, c["command"]) for d, c, _ in client.take()) == \
+        [("device-001", "rollback"), ("device-002", "rollback")]
+    names = [e for e, _ in events(store, rid)]
+    assert names[-3:] == ["device_verdict", "halted", "rollback_started"]
+
+
+def test_too_many_errors_roll_back(store, logic, pg, runner, msgs):
+    rid = updated(store, logic, pg, runner, msgs, target="2.1")
+    heartbeat(pg, "device-001", "2.1", errors=5, status="unhealthy")
+    runner.tick()
+    assert rollout_state(pg, rid) == "in_progress"          # 5 errors: within the limit
+    heartbeat(pg, "device-001", "2.1", errors=10, status="unhealthy")
+    runner.tick()
+    assert store.rollout(rid)["halt_reason"] == \
+        "automatic: device-001 unhealthy: reported 15 errors within 0 s of updating to 2.1 (limit 10)"
+
+
+def test_errors_before_the_update_do_not_count(store, logic, pg, runner, msgs):
+    add_devices(pg, "device-001")
+    heartbeat(pg, "device-001", "1.0", errors=50, crashes=3)  # the old firmware's trouble
+    rid = start(store, logic, "2.0", limits=strict(logic))
+    runner.tick()
+    runner.on_event(event(msgs, "device-001", "update_succeeded", rid, "2.0"))
+    runner.tick()
+    assert rollout_state(pg, rid) == "in_progress" and verdicts(store, rid) == {}
+
+
+def test_a_failed_install_rolls_back(store, logic, pg, runner, client, msgs):
+    add_devices(pg, "device-001", "device-002")
+    rid = start(store, logic, "2.0", limits=strict(logic))
+    runner.tick()
+    client.take()
+    runner.on_event(event(msgs, "device-002", "update_failed", rid, "2.0", "checksum mismatch"))
+    runner.tick()
+    assert store.rollout(rid)["halt_reason"] == \
+        "automatic: 1 device(s) failed to update (limit 0): device-002 (checksum mismatch)"
+    # device-001 never answered yet: it is rolled back too (a no-op on the device if needed).
+    assert sorted(d for d, _, _ in client.take()) == ["device-001", "device-002"]
+
+
+def test_failed_installs_within_the_limit_continue(store, logic, pg, runner, msgs):
+    add_devices(pg, "device-001", "device-002")
+    rid = start(store, logic, "2.0", limits=strict(logic, max_failed_devices=1))
+    runner.tick()
+    runner.on_event(event(msgs, "device-001", "update_succeeded", rid, "2.0"))
+    runner.on_event(event(msgs, "device-002", "update_failed", rid, "2.0", "download failed"))
+    age_window(pg, rid, 61)
+    runner.tick()
+    assert rollout_state(pg, rid) == "completed"
+    assert events(store, rid)[-1] == ("completed",
+                                      "1 of 2 devices updated and healthy; failed: device-002")
+
+
+def test_an_offline_device_never_triggers_a_rollback(store, logic, pg, runner, msgs):
+    """device-002 drops off before answering: not reached, not a failed update."""
+    add_devices(pg, "device-001", "device-002")
+    rid = start(store, logic, "2.0", limits=strict(logic))
+    runner.tick()
+    runner.on_event(event(msgs, "device-001", "update_succeeded", rid, "2.0"))
+    age_commands(pg, rid, TIMEOUT + 1)            # device-002: no event, no heartbeat since
+    age_window(pg, rid, 61)
+    heartbeat(pg, "device-001", "2.0")
+    runner.tick()
+    assert verdicts(store, rid) == {"device-001": "healthy", "device-002": "not_reached"}
+    assert rollout_state(pg, rid) == "completed"
+    assert events(store, rid)[-1][1].endswith("not reached (offline): device-002")
+
+
+def test_heartbeating_without_answering_rolls_back(store, logic, pg, runner, msgs):
+    add_devices(pg, "device-001", "device-002")
+    rid = start(store, logic, "2.0", limits=strict(logic))
+    runner.tick()
+    pg.execute("UPDATE rollout_devices SET updated_at = now() - make_interval(secs => %s) "
+               "WHERE rollout_id = %s AND device_id = 'device-002'", (TIMEOUT + 1, rid))
+    heartbeat(pg, "device-002", "1.0")             # alive, but never replied
+    runner.tick()
+    assert verdicts(store, rid)["device-002"] == "no_reply"
+    assert store.rollout(rid)["halt_reason"].startswith(
+        "automatic: 1 device(s) failed to update (limit 0): device-002 (sent 1 heartbeat(s)")
+
+
+def test_silence_after_updating_rolls_back(store, logic, pg, runner, msgs):
+    rid = updated(store, logic, pg, runner, msgs)
+    pg.execute("UPDATE devices SET last_heartbeat = now() - interval '50 seconds' "
+               "WHERE device_id = 'device-002'")
+    runner.tick()
+    assert verdicts(store, rid)["device-002"] == "unresponsive"
+    assert store.rollout(rid)["halt_reason"].startswith(
+        "automatic: device-002 unresponsive: no heartbeat for 50 s after updating to 2.0")
+
+
+def test_no_verdicts_after_the_rollout_halts(store, logic, pg, runner, msgs):
+    rid = updated(store, logic, pg, runner, msgs, target="2.1")
+    heartbeat(pg, "device-001", "2.1", crashes=1)
+    runner.tick()
+    heartbeat(pg, "device-002", "2.1", crashes=1)  # arrives after the halt
+    runner.tick()
+    assert verdicts(store, rid) == {"device-001": "unhealthy"}
+    assert [e for e, _ in events(store, rid)].count("halted") == 1
+
+
+def test_automatic_rollback_completes(store, logic, pg, runner, msgs):
+    rid = updated(store, logic, pg, runner, msgs, target="2.1")
+    heartbeat(pg, "device-001", "2.1", crashes=1)
+    runner.tick()
+    for d in ("device-001", "device-002"):
+        runner.on_event(event(msgs, d, "rollback_succeeded", rid, "1.0"))
+    runner.tick()
+    assert rollout_state(pg, rid) == "rolled_back"
+    assert events(store, rid)[-1] == ("rollback_completed", "2 of 2 devices rolled back")

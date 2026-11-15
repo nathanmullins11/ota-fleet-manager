@@ -178,8 +178,10 @@ run_key_action() {
                 | grep -v -E "^$|Follow it|cli.py rollout status"
             ;;
         f)
-            printf '$ cli.py rollout start 2.1 --devices device-003\n'
-            cp_compose exec -T orchestrator python cli.py rollout start 2.1 --devices device-003 2>&1 \
+            # Errors up to 50 allowed, so the crash is what triggers the automatic rollback.
+            printf '$ cli.py rollout start 2.1 --devices device-003 --max-errors 50\n'
+            cp_compose exec -T orchestrator python cli.py rollout start 2.1 --devices device-003 \
+                --max-errors 50 2>&1 \
                 | grep -v -E "^$|Follow it|cli.py rollout status"
             ;;
         b)
