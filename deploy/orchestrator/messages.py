@@ -37,6 +37,8 @@ class Heartbeat:
     error_count: int
     crash_count: int
     timestamp: datetime
+    cpu_percent: Optional[float] = None     # container CPU, percent of one core
+    memory_mb: Optional[float] = None       # container memory, MiB
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,16 @@ def _optional_int(data: dict, key: str, default: int = 0) -> int:
     return _int(data, key) if key in data else default
 
 
+def _optional_number(data: dict, key: str, maximum: float) -> Optional[float]:
+    """An optional number in [0, maximum]. Absent gives None; null and booleans are rejected."""
+    if key not in data:
+        return None
+    value = data[key]
+    if type(value) not in (int, float) or not 0 <= value <= maximum or value != value:
+        raise InvalidMessage(f"{key} must be a number from 0 to {maximum:g}")
+    return float(value)
+
+
 def _version(data: dict, key: str) -> str:
     value = data.get(key)
     if not isinstance(value, str) or not VERSION_RE.fullmatch(value):
@@ -115,6 +127,9 @@ def parse_heartbeat(topic_device_id: str, payload: bytes) -> Heartbeat:
         # Optional so agents that predate crash reporting stay valid.
         crash_count=_optional_int(data, "crash_count"),
         timestamp=_timestamp(data),
+        # Optional resource use, for the dashboard and scale tests (NF-4).
+        cpu_percent=_optional_number(data, "cpu_percent", 100_000),
+        memory_mb=_optional_number(data, "memory_mb", 1_000_000),
     )
 
 

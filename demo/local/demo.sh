@@ -5,7 +5,7 @@
 #   demo/local/demo.sh --auto     # runs straight through (rehearsals, recordings)
 #   demo/local/demo.sh --keep     # leave everything running afterwards
 #   demo/local/demo.sh --simulate # fake the device replies (before the device update logic exists)
-#   demo/local/demo.sh --devices N  # number of simulated devices, 3 to 50 (default 5)
+#   demo/local/demo.sh --devices N  # number of simulated devices, 10 to 50 (default 10)
 #   demo/local/demo.sh --detail   # full evidence: device logs, firmware processes, raw messages
 #
 # By default the demo checks what the devices really do (install, crash, roll back, reject
@@ -30,8 +30,8 @@ while (($#)); do
     esac
     shift
 done
-if [[ -n "${DEVICE_COUNT:-}" ]] && ! { [[ "$DEVICE_COUNT" =~ ^[0-9]+$ ]] && ((DEVICE_COUNT >= 3 && DEVICE_COUNT <= 50)); }; then
-    echo "--devices must be a number from 3 to 50 (steps use device-002 and device-003)" >&2
+if [[ -n "${DEVICE_COUNT:-}" ]] && ! { [[ "$DEVICE_COUNT" =~ ^[0-9]+$ ]] && ((DEVICE_COUNT >= 10 && DEVICE_COUNT <= 50)); }; then
+    echo "--devices must be a number from 10 to 50 (steps use devices up to device-009)" >&2
     exit 2
 fi
 
@@ -41,6 +41,8 @@ export MQTT_HOST=host.docker.internal
 export REGISTRY_URL=http://host.docker.internal:8080
 # Only for the demo's own throwaway database; overrides deploy/.env if there is one.
 export POSTGRES_PASSWORD="demo-$RANDOM$RANDOM"
+export GRAFANA_ADMIN_PASSWORD="demo-$RANDOM$RANDOM"
+export GRAFANA_DB_PASSWORD="demo-$RANDOM$RANDOM"
 # Devices that never answer a command are marked failed after this; short, so a missing
 # device feature does not hold up the next step for two minutes.
 export COMMAND_TIMEOUT_SECONDS=30
@@ -66,7 +68,7 @@ cleanup() {
 
 require_docker
 check_no_other_devices
-for port in 1883 5432 8080; do
+for port in 1883 3000 5432 8080; do
     if port_open 127.0.0.1 "$port"; then
         die "Port $port is already in use on this machine, so the demo control plane cannot start.
   If your own control plane is running, stop it first:  (cd deploy && docker compose down)"

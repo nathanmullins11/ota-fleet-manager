@@ -6,6 +6,7 @@ main.py creates one for the MQTT callback thread and one for the main thread.
 import logging
 
 import psycopg
+from psycopg import sql
 
 from config import Config
 from messages import Heartbeat
@@ -14,22 +15,25 @@ log = logging.getLogger("orchestrator.db")
 
 UPSERT_DEVICE = """
     INSERT INTO devices (device_id, current_version, status, error_count, crash_count,
-                         last_heartbeat)
-    VALUES (%(device_id)s, %(version)s, %(status)s, %(error_count)s, %(crash_count)s, now())
+                         cpu_percent, memory_mb, last_heartbeat)
+    VALUES (%(device_id)s, %(version)s, %(status)s, %(error_count)s, %(crash_count)s,
+            %(cpu_percent)s, %(memory_mb)s, now())
     ON CONFLICT (device_id) DO UPDATE
       SET current_version = EXCLUDED.current_version,
           status          = EXCLUDED.status,
           error_count     = EXCLUDED.error_count,
           crash_count     = EXCLUDED.crash_count,
+          cpu_percent     = EXCLUDED.cpu_percent,
+          memory_mb       = EXCLUDED.memory_mb,
           last_heartbeat  = EXCLUDED.last_heartbeat,
           updated_at      = now()
 """
 
 INSERT_HEARTBEAT = """
     INSERT INTO heartbeats (device_id, reported_version, status, error_count, crash_count,
-                            reported_at)
+                            cpu_percent, memory_mb, reported_at)
     VALUES (%(device_id)s, %(version)s, %(status)s, %(error_count)s, %(crash_count)s,
-            %(timestamp)s)
+            %(cpu_percent)s, %(memory_mb)s, %(timestamp)s)
 """
 
 MARK_OFFLINE = """
@@ -77,6 +81,7 @@ class Database:
         params = {
             "device_id": hb.device_id, "version": hb.version, "status": hb.status,
             "error_count": hb.error_count, "crash_count": hb.crash_count,
+            "cpu_percent": hb.cpu_percent, "memory_mb": hb.memory_mb,
             "timestamp": hb.timestamp,
         }
 
@@ -87,6 +92,19 @@ class Database:
 
         self._run(work)
 
+    def record_rejected(self, device_id: str, topic: str, kind: str, reason: str,
+                        payload: bytes = b"") -> None:
+        """A message the system refused, for the dashboard's security panel."""
+        text = payload[:300].decode("utf-8", errors="replace") if payload else None
+
+        def work(conn):
+            with conn.transaction():
+                conn.execute("INSERT INTO rejected_messages (device_id, topic, kind, reason, "
+                             "payload) VALUES (%s, %s, %s, %s, %s)",
+                             (device_id, topic, kind, reason[:500], text))
+
+        self._run(work)
+
     def mark_stale_offline(self, timeout_seconds: int) -> list:
         """Mark devices with no recent heartbeat as offline; return their IDs."""
         def work(conn):
@@ -94,6 +112,31 @@ class Database:
                 return [row[0] for row in conn.execute(MARK_OFFLINE, (timeout_seconds,))]
 
         return self._run(work)
+
+    def ensure_dashboard_reader(self, user: str, password: str) -> None:
+        """Create or update the dashboard's login: it can read every table and view, now and
+        later, and write nothing. Safe to run on every start."""
+        def work(conn):
+            role = sql.Identifier(user)
+            with conn.transaction():
+                exists = conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s",
+                                      (user,)).fetchone()
+                verb = sql.SQL("ALTER ROLE" if exists else "CREATE ROLE")
+                conn.execute(sql.SQL("{} {} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                                     "PASSWORD {}").format(verb, role, sql.Literal(password)))
+                conn.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                    sql.Identifier(self._cfg.db_name), role))
+                conn.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(role))
+                conn.execute(sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA public TO {}")
+                             .format(role))
+                # Tables and views created later by this owner (migrations) too.
+                conn.execute(sql.SQL("ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+                                     "GRANT SELECT ON TABLES TO {}").format(role))
+                # Belt and braces: the login's sessions are read-only even if a grant slips.
+                conn.execute(sql.SQL("ALTER ROLE {} SET default_transaction_read_only = on")
+                             .format(role))
+
+        self._run(work)
 
     def close(self) -> None:
         if self._conn is not None:

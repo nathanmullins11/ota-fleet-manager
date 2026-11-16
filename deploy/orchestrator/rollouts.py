@@ -440,6 +440,17 @@ class RolloutRunner:
         if ignored:
             log.warning("Rollout %d: ignored %s from %s: %s",
                         ev.rollout_id, ev.event, ev.device_id, ignored)
+            if ignored == "device is not part of this rollout" and ev.event.endswith("_failed"):
+                # A command the orchestrator never sent, which the device refused: a forged
+                # or replayed command. Recorded for the dashboard's security panel.
+                command = ev.event.removesuffix("_failed")
+                reason = (f"refused {'an' if command == 'update' else 'a'} {command} to "
+                          f"{ev.version} for "
+                          f"rollout {ev.rollout_id}, which the orchestrator never sent"
+                          + (f": {ev.reason}" if ev.reason else ""))
+                self.store.db.record_rejected(ev.device_id, f"ota/devices/{ev.device_id}/events",
+                                              "refused_command", reason)
+                log.warning("%s %s", ev.device_id, reason)
         elif new_state == "failed":
             log.warning("Rollout %d: %s reported %s for %s%s",
                         ev.rollout_id, ev.device_id, ev.event, ev.version, suffix)

@@ -1,0 +1,13 @@
+# Loads every dashboard JSON in deploy/grafana/dashboards/ (mounted read-only), so the
+# dashboard in the repository is the one that runs. Edit the JSON, not the Grafana UI.
+apiVersion: 1
+
+providers:
+  - name: OTA Fleet Manager
+    folder: ""
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards

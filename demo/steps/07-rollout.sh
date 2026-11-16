@@ -119,14 +119,26 @@ declare -A PID_BEFORE=()
 for i in $(seq 1 "$DEVICE_COUNT"); do
     PID_BEFORE[$(device_id "$i")]=$(firmware_pid "$(device_id "$i")")
 done
+# Offline is not a failure: device-009 drops off just as the rollout starts. The registry
+# still lists it as healthy (offline is declared after 30 s of silence), so it is commanded,
+# never answers, and is judged "not reached"; the rollout must still complete.
+DROPPED=device-009
+say "Just before the rollout, $DROPPED loses power (its container stops). It is still listed as"
+say "healthy, so it gets a command it will never answer. That must not count as a failed update."
+run_note "docker stop $(container_of "$DROPPED")"
+docker stop "$(container_of "$DROPPED")" >/dev/null
+echo
 if begin_rollout 2.0 u "update every online device to 2.0" --all; then
     ROLLOUT_RID=$RID
     mapfile -t ROLLOUT_TARGETS < <(commanded_devices update "$RID")
+    # The devices expected to update: every target except the one that dropped off.
+    ROLLOUT_UPDATED=()
+    for d in "${ROLLOUT_TARGETS[@]}"; do [[ "$d" == "$DROPPED" ]] || ROLLOUT_UPDATED+=("$d"); done
     say "The command ${ROLLOUT_TARGETS[0]} received:"
     commands_seen update "$RID" | grep "/${ROLLOUT_TARGETS[0]}/" | head -n 1 | show_command
     pause
 
-    for d in "${ROLLOUT_TARGETS[@]}"; do
+    for d in "${ROLLOUT_UPDATED[@]}"; do
         if expect "$(event_timeout)" "$d installs 2.0 and reports update_succeeded" "$mark" "$d" \
                 event_seen "$mark" "$d" update_succeeded "$RID"; then
             expect 20 "$d's heartbeat reports version 2.0" "$mark" "$d" \
@@ -142,18 +154,18 @@ if begin_rollout 2.0 u "update every online device to 2.0" --all; then
     # Proof from inside the containers: each device's old firmware process was stopped and a
     # new one runs from the 2.0 folder (not just a new version label in the heartbeat).
     replaced=0 process_lines=()
-    for d in "${ROLLOUT_TARGETS[@]}"; do
+    for d in "${ROLLOUT_UPDATED[@]}"; do
         now_pid=$(firmware_pid "$d")
         now_version=$(firmware_running_version "$d")
         [[ "$now_version" == 2.0 && -n "$now_pid" && "$now_pid" != "${PID_BEFORE[$d]:-}" ]] \
             && replaced=$((replaced + 1))
         process_lines+=("$d: pid ${PID_BEFORE[$d]:-?} (1.0) → pid ${now_pid:-none} (${now_version:-nothing running})")
     done
-    first=${ROLLOUT_TARGETS[0]}
-    if ((replaced == ${#ROLLOUT_TARGETS[@]})); then
-        check_pass "Every device replaced its firmware process: ${process_lines[0]}"
+    first=${ROLLOUT_UPDATED[0]}
+    if ((replaced == ${#ROLLOUT_UPDATED[@]})); then
+        check_pass "Every updated device replaced its firmware process: ${process_lines[0]}"
     else
-        check_fail "Only $replaced of ${#ROLLOUT_TARGETS[@]} devices run a new firmware 2.0 process" \
+        check_fail "Only $replaced of ${#ROLLOUT_UPDATED[@]} devices run a new firmware 2.0 process" \
                    "$(printf '%s; ' "${process_lines[@]}")"
     fi
     downloads=$(device_log "$first" "$t0" "^[0-9:]+ 2.0 downloaded" | wc -l)
@@ -164,13 +176,13 @@ if begin_rollout 2.0 u "update every online device to 2.0" --all; then
     proof "$first's installed state: $(device_state_file "$first")"
     # Firmware state policy: 2.0 converts the device's state to schema 2, which 1.0 cannot read.
     converted=0
-    for d in "${ROLLOUT_TARGETS[@]}"; do
+    for d in "${ROLLOUT_UPDATED[@]}"; do
         [[ "$(firmware_config "$d" | json_field state_schema)" == 2 ]] && converted=$((converted + 1))
     done
-    if ((converted == ${#ROLLOUT_TARGETS[@]})); then
+    if ((converted == ${#ROLLOUT_UPDATED[@]})); then
         check_pass "Firmware 2.0 converted every device's state to schema 2 (1.0 cannot read it; the agent kept a snapshot)"
     else
-        check_fail "Only $converted of ${#ROLLOUT_TARGETS[@]} devices have schema 2 state after the update" \
+        check_fail "Only $converted of ${#ROLLOUT_UPDATED[@]} devices have schema 2 state after the update" \
                    "$first: $(firmware_config "$first")"
     fi
     proof "$first's firmware state: $(firmware_config "$first")"
@@ -189,21 +201,39 @@ if begin_rollout 2.0 u "update every online device to 2.0" --all; then
         run_note "python cli.py rollout status $RID"
         cli rollout status "$RID" | indent
         updated=$(cp_psql -Atc "SELECT count(*) FROM rollout_devices WHERE rollout_id = $RID AND state = 'updated';")
-        if [[ "$updated" == "${#ROLLOUT_TARGETS[@]}" ]]; then
+        if [[ "$updated" == "${#ROLLOUT_UPDATED[@]}" ]]; then
             check_pass "rollout $RID completed: ${updated} of ${#ROLLOUT_TARGETS[@]} devices updated"
         else
-            check_fail "rollout $RID: only ${updated:-0} of ${#ROLLOUT_TARGETS[@]} devices updated" \
+            check_fail "rollout $RID: only ${updated:-0} of ${#ROLLOUT_UPDATED[@]} online devices updated" \
                        "devices without a reply are marked failed after the command timeout"
         fi
         healthy=$(cp_psql -Atc "SELECT count(*) FROM rollout_devices WHERE rollout_id = $RID AND verdict = 'healthy';")
-        if [[ "$healthy" == "${#ROLLOUT_TARGETS[@]}" ]]; then
+        if [[ "$healthy" == "${#ROLLOUT_UPDATED[@]}" ]]; then
             check_pass "Every device was judged healthy after its ${HEALTH_WINDOW_SECONDS:-60} s health window, so the rollout completed (no automatic rollback)"
         else
-            check_fail "only ${healthy:-0} of ${#ROLLOUT_TARGETS[@]} devices were judged healthy" \
+            check_fail "only ${healthy:-0} of ${#ROLLOUT_UPDATED[@]} devices were judged healthy" \
                        "$(cp_psql -Atc "SELECT string_agg(device_id || ' ' || coalesce(verdict, 'no verdict'), ', ') FROM rollout_devices WHERE rollout_id = $RID;")"
         fi
+        verdict=$(cp_psql -Atc "SELECT coalesce(verdict, 'none') FROM rollout_devices
+                                 WHERE rollout_id = $RID AND device_id = '$DROPPED';")
+        if [[ "$verdict" == not_reached && "$(rollout_state "$RID")" == completed ]]; then
+            check_pass "$DROPPED was 'not reached' (offline, not a failed update), and the rollout completed without a rollback"
+        else
+            check_fail "$DROPPED's dropout was not handled as offline" \
+                       "verdict: $verdict; rollout state: $(rollout_state "$RID")"
+        fi
     else
-        look_at_vm "the Current rollout panel shows rollout $RID: every device updated, then COMPLETED."
+        look_at_vm "the Current rollout panel shows rollout $RID COMPLETED, with $DROPPED 'not reached'."
     fi
+fi
+echo
+say "$DROPPED gets its power back. It never received 2.0, so it is still on 1.0."
+run_note "docker start $(container_of "$DROPPED")"
+docker start "$(container_of "$DROPPED")" >/dev/null
+back_mark=$(listener_mark)
+if wait_until 30 "waiting for $DROPPED's next heartbeat" hb_is "$back_mark" "$DROPPED" version 1.0; then
+    ok "$DROPPED is back online on 1.0 (${WAITED}s)."
+else
+    warn "$DROPPED has not sent a heartbeat yet."
 fi
 pause

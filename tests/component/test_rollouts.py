@@ -574,3 +574,25 @@ def test_automatic_rollback_completes(store, logic, pg, runner, msgs):
     runner.tick()
     assert rollout_state(pg, rid) == "rolled_back"
     assert events(store, rid)[-1] == ("rollback_completed", "2 of 2 devices rolled back")
+
+
+
+# --------------------------------------------------------------------------- refused commands
+
+def test_a_refused_forged_command_is_recorded(store, logic, pg, runner, msgs):
+    add_devices(pg, "device-002")
+    runner.on_event(event(msgs, "device-002", "update_failed", 900001, "2.0",
+                          "checksum in manifest does not match the command"))
+    kind, reason = pg.execute("SELECT kind, reason FROM rejected_messages").fetchone()
+    assert kind == "refused_command"
+    assert reason == ("refused an update to 2.0 for rollout 900001, which the orchestrator never "
+                      "sent: checksum in manifest does not match the command")
+
+
+def test_other_ignored_events_are_not_security_records(store, logic, pg, runner, msgs):
+    add_devices(pg, "device-001")
+    rid = start(store, logic, "2.0")
+    runner.tick()
+    runner.on_event(event(msgs, "device-001", "update_succeeded", 900001, "2.0"))  # unknown rollout
+    runner.on_event(event(msgs, "device-001", "update_failed", rid, "2.1"))        # wrong version
+    assert pg.execute("SELECT count(*) FROM rejected_messages").fetchone() == (0,)

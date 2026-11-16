@@ -7,7 +7,7 @@
 #   demo/cloud/devices.sh <vm-ip> --auto    # runs straight through
 #   demo/cloud/devices.sh <vm-ip> --keep    # leave the devices running afterwards
 #   demo/cloud/devices.sh <vm-ip> --simulate  # fake the device replies
-#   demo/cloud/devices.sh <vm-ip> --devices N # number of simulated devices, 3 to 50 (default 5)
+#   demo/cloud/devices.sh <vm-ip> --devices N # number of simulated devices, 10 to 50 (default 10)
 #   demo/cloud/devices.sh <vm-ip> --detail    # full evidence: device logs, processes, raw messages
 #
 # The VM's security group must allow TCP 1883 (MQTT) from your IP, and TCP 8080
@@ -30,8 +30,8 @@ while (($#)); do
     esac
     shift
 done
-if [[ -n "${DEVICE_COUNT:-}" ]] && ! { [[ "$DEVICE_COUNT" =~ ^[0-9]+$ ]] && ((DEVICE_COUNT >= 3 && DEVICE_COUNT <= 50)); }; then
-    echo "--devices must be a number from 3 to 50 (steps use device-002 and device-003)" >&2
+if [[ -n "${DEVICE_COUNT:-}" ]] && ! { [[ "$DEVICE_COUNT" =~ ^[0-9]+$ ]] && ((DEVICE_COUNT >= 10 && DEVICE_COUNT <= 50)); }; then
+    echo "--devices must be a number from 10 to 50 (steps use devices up to device-009)" >&2
     exit 2
 fi
 if [[ -z "$VM_HOST" ]]; then

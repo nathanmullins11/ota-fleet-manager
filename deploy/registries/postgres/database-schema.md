@@ -144,6 +144,12 @@ Used from Iteration 2 for manual rollouts (`orchestrator/cli.py`); Iteration 3 a
 
 **Life cycle** (`rollouts.state`): `pending` (created by the CLI) → `in_progress` (commands sent) → `completed` (every device answered). A rollback request sets `halted`; once every device has answered the rollback commands, `rolled_back`. Per device (`rollout_devices.state`): `pending` → `commanded` → `updated` or `failed`; after a rollback request `commanded` → `rolled_back` or `failed`. The rules are in `orchestrator/rollout_logic.py`. When a device reports `update_succeeded`, `devices.previous_version` is set to the rollout's `rollback_version`. Health evaluation (migration `002_health_evaluation.sql`): `rollouts` stores the health limits it is judged by (`health_window_seconds`, `max_crashes`, `max_errors`, `max_failed_devices`, `unresponsive_seconds`); `rollout_devices` gets `window_started_at` (when `update_succeeded` arrived) and a `verdict` (`healthy`, `unhealthy`, `unresponsive`, `failed_update`, `no_reply`, `not_reached`) with `verdict_reason` and `verdict_at`. Each verdict is also a `device_verdict` entry in `rollout_events`. An automatic halt is a `halted` event whose reason starts with `automatic:`.
 
+### `rejected_messages`, `control_plane_stats` (migration `003_resources_and_security.sql`)
+
+- `rejected_messages`: every message the orchestrator rejected (`invalid_message`) and every forged command a device refused (`refused_command`), with the device, topic, reason and the start of the message. No foreign key: the device may not be registered.
+- `control_plane_stats`: CPU (percent of one core) and memory (MiB) of each control-plane container, every 5 seconds, written by the stats collector and kept 24 hours.
+- `devices` and `heartbeats` also gained `cpu_percent` and `memory_mb` (optional heartbeat fields), and `fleet_overview` shows them.
+
 - `rollouts` records the release: the version being rolled out, the `rollback_version` (last known good), the state, the current stage, and a `halt_reason` if it stopped.
 - `rollout_devices` records, per device, whether it was commanded, updated, failed, or rolled back. Counting these gives **percent of fleet exposed** to a bad update.
 - `rollout_events` logs each decision (started, stage advanced, halted, rollback started, rollback completed, completed) with a reason. This satisfies the requirement that every rollout decision is recorded, and it is the source for **time to detect** and **time to roll back**.
@@ -211,7 +217,7 @@ The migration is safe to run more than once. Alternatively, `docker compose down
 
 ## 7. Example queries
 
-These are starting points for the Grafana dashboard and the experiments.
+These are starting points for the experiments. The Grafana dashboard's own queries are in `deploy/grafana/dashboards/fleet.json`; it reads through the read-only `dashboard_reader` login, which the orchestrator creates at start-up.
 
 **Devices by version and status**
 

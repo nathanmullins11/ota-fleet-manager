@@ -25,6 +25,10 @@ class Config:
     max_errors: int = 10
     max_failed_devices: int = 0
     unresponsive_seconds: int = 45
+    # Read-only database login for the Grafana dashboard; created at start-up when a
+    # password is set (db.Database.ensure_dashboard_reader).
+    dashboard_db_user: str = "dashboard_reader"
+    dashboard_db_password: str = ""
 
     def health_limits(self):
         from rollout_logic import HealthLimits
@@ -58,4 +62,6 @@ def load_config() -> Config:
         max_errors=int(os.environ.get("HEALTH_MAX_ERRORS", "10")),
         max_failed_devices=int(os.environ.get("HEALTH_MAX_FAILED_DEVICES", "0")),
         unresponsive_seconds=int(os.environ.get("HEALTH_UNRESPONSIVE_SECONDS", "45")),
+        dashboard_db_user=os.environ.get("GRAFANA_DB_USER", "dashboard_reader"),
+        dashboard_db_password=os.environ.get("GRAFANA_DB_PASSWORD", ""),
     )

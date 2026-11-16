@@ -39,6 +39,8 @@ CREATE TABLE devices (
         CHECK (status IN ('unknown', 'healthy', 'degraded', 'unhealthy', 'updating', 'offline')),
     error_count       INTEGER NOT NULL DEFAULT 0,    -- errors since last report/restart
     crash_count       INTEGER NOT NULL DEFAULT 0,    -- firmware crashes since last report
+    cpu_percent       REAL,                          -- container CPU, percent of one core
+    memory_mb         REAL,                          -- container memory, MiB
     rollout_group     TEXT REFERENCES rollout_groups(name),
     last_heartbeat    TIMESTAMPTZ,
     registered_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -59,6 +61,8 @@ CREATE TABLE heartbeats (
     status           TEXT,
     error_count      INTEGER,
     crash_count      INTEGER NOT NULL DEFAULT 0,
+    cpu_percent      REAL,
+    memory_mb        REAL,
     reported_at      TIMESTAMPTZ,                    -- timestamp from the device
     received_at      TIMESTAMPTZ NOT NULL DEFAULT now()  -- timestamp at the orchestrator
 );
@@ -129,6 +133,8 @@ SELECT device_id,
        status,
        error_count,
        crash_count,
+       cpu_percent,
+       memory_mb,
        rollout_group,
        last_heartbeat,
        EXTRACT(EPOCH FROM (now() - last_heartbeat))::INTEGER AS seconds_since_heartbeat
@@ -165,3 +171,28 @@ INSERT INTO firmware_versions (version, notes) VALUES
 --   INSERT INTO heartbeats (device_id, reported_version, status, error_count, crash_count, reported_at)
 --   VALUES (%(id)s, %(version)s, %(status)s, %(errors)s, %(crashes)s, %(device_ts)s);
 -- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- Messages the orchestrator rejected (invalid_message) and forged commands devices refused
+-- (refused_command). No foreign key: the device may not be registered.
+CREATE TABLE rejected_messages (
+    id          BIGSERIAL PRIMARY KEY,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    device_id   TEXT NOT NULL,
+    topic       TEXT NOT NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('invalid_message', 'refused_command')),
+    reason      TEXT NOT NULL,
+    payload     TEXT                       -- the start of the message, for investigation
+);
+CREATE INDEX rejected_messages_time_idx ON rejected_messages (received_at DESC);
+
+-- CPU and memory of each control-plane container, sampled by the stats collector.
+CREATE TABLE control_plane_stats (
+    id          BIGSERIAL PRIMARY KEY,
+    sampled_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    service     TEXT NOT NULL,             -- Compose service name
+    cpu_percent REAL NOT NULL,             -- percent of one core
+    memory_mb   REAL NOT NULL
+);
+CREATE INDEX control_plane_stats_time_idx ON control_plane_stats (sampled_at DESC);
+

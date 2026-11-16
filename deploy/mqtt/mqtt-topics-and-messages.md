@@ -74,11 +74,17 @@ Sent on a fixed interval (suggested: every 5 seconds, configurable on the agent)
 | `status` | string | yes | `healthy`, `degraded`, `unhealthy`, or `updating` |
 | `error_count` | integer | yes | Errors since the previous heartbeat (not a running total) |
 | `crash_count` | integer | no (default `0`) | Firmware crashes since the previous heartbeat (not a running total) |
+| `cpu_percent` | number | no | The device's CPU use since the previous heartbeat, in percent of one core |
+| `memory_mb` | number | no | The device's memory in use, in MiB |
 | `timestamp` | string | yes | Device clock when the message was created |
 
 **What counts as a crash:** the firmware process exiting when the agent did not ask it to, or with a non-zero exit code (see `firmware/README.md`). Stopping the firmware on purpose for an update or rollback is not a crash. While crashed firmware is waiting to be restarted, the agent reports `status` `unhealthy`. Crashes are counted apart from errors so the orchestrator can apply separate thresholds to each (FR-4) and log which one was breached (NF-5). Because the container stays up when the firmware crashes, heartbeats keep arriving; a device whose heartbeats stop is offline, not crashed.
 
 `crash_count` is optional so agents that do not send it yet stay valid; it is treated as `0` when absent. `null` is rejected.
+
+`cpu_percent` and `memory_mb` are optional too (absent means "not measured"; `null` is rejected). The agent reads them from its container's cgroup, so they cover the agent and its firmware together and match `docker stats`. They feed the dashboard's Resources section and the scale tests (NF-4).
+
+**Rejected messages are recorded.** A message the orchestrator rejects is logged and stored in `rejected_messages` (kind `invalid_message`), and so is a device's `update_failed` / `rollback_failed` for a rollout the orchestrator never started (kind `refused_command`: the device refused a forged or replayed command). The dashboard's Security section shows both.
 
 **Status values the device may send:** `healthy`, `degraded`, `unhealthy`, `updating`. The values `offline` and `unknown` in the database are set by the orchestrator (for example when heartbeats stop). A device never sends them.
 
@@ -91,6 +97,7 @@ Sent on a fixed interval (suggested: every 5 seconds, configurable on the agent)
 | `status` | `devices.status`, `heartbeats.status` |
 | `error_count` | `devices.error_count`, `heartbeats.error_count` |
 | `crash_count` | `devices.crash_count`, `heartbeats.crash_count` |
+| `cpu_percent`, `memory_mb` | `devices` and `heartbeats`, same names |
 | `timestamp` | `heartbeats.reported_at` |
 | (time of arrival) | `devices.last_heartbeat`, `heartbeats.received_at` |
 
@@ -252,3 +259,4 @@ The first terminal should print the topic and the message. This is also the easi
 | Iteration 1 | Initial draft | (pending review) |
 | 2026-11-04 | Stricter validation: UTC-only timestamps, integer ranges, exact-match IDs and versions | (pending review) |
 | 2026-11-11 | Device behavior rules settled with the device update logic: queue commands while busy, `already running` answer, `invalid command` answer, revert when new firmware does not start | (pending review) |
+| 2026-11-15 | Optional heartbeat fields `cpu_percent` and `memory_mb`; rejected messages and refused commands are recorded | (pending review) |

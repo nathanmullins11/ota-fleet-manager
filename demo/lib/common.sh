@@ -16,7 +16,7 @@ AUTO=${AUTO:-0}
 CP_LOCAL=${CP_LOCAL:-1}
 CP_PROJECT=${CP_PROJECT:-}
 MQTT_PORT=${MQTT_PORT:-1883}
-DEVICE_COUNT=${DEVICE_COUNT:-5}
+DEVICE_COUNT=${DEVICE_COUNT:-10}
 REGISTRY_REACHABLE=${REGISTRY_REACHABLE:-1}
 SIMULATE=${SIMULATE:-0}
 DETAIL=${DETAIL:-0}
@@ -27,6 +27,11 @@ MQTT_IMAGE=eclipse-mosquitto:2
 DEMO_LABEL=ota-demo=device
 # Lets a container reach ports published on this machine (Linux, WSL, Docker Desktop).
 HOST_GATEWAY=(--add-host host.docker.internal:host-gateway)
+
+# The demo runs with `set -o pipefail`. A pipeline ending in `grep -q` can then report "no
+# match" when it found one: grep -q exits at the first match and the commands before it fail
+# writing to the closed pipe. Pipelines here end in `grep -c ... >/dev/null`, which reads all
+# of its input, instead.
 
 # --------------------------------------------------------------------------- output
 
@@ -211,7 +216,7 @@ start_device() {
         "$DEVICE_IMAGE" >/dev/null
 }
 
-device_connected() { docker logs "$(device_name "$1")" 2>&1 | grep -q "Connected to broker"; }
+device_connected() { docker logs "$(device_name "$1")" 2>&1 | grep -c "Connected to broker" >/dev/null; }
 
 remove_devices() {
     local ids
@@ -373,7 +378,7 @@ hb_is()    { [[ "$(hb_field "$1" "$2" "$3")" == "$4" ]]; }
 # Any heartbeat since MARK with KEY equal to / above a value (errors and crashes come and go).
 hb_values() { lines_since "$1" | grep " ota/devices/$2/heartbeat " \
                 | sed -n "s/.*\"$3\": *\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p"; }
-hb_ever_is()    { hb_values "$1" "$2" "$3" | grep -qx "$4"; }
+hb_ever_is()    { hb_values "$1" "$2" "$3" | grep -cx "$4" >/dev/null; }
 hb_ever_above() { hb_values "$1" "$2" "$3" | awk -v n="$4" '$1 + 0 > n { f = 1 } END { exit !f }'; }
 
 # event_line MARK DEVICE EVENT [ROLLOUT_ID]: the first such event since MARK.
@@ -514,7 +519,7 @@ begin_rollback() {
 new_command() {
     lines_since "$1" | grep " ota/devices/[^/]*/commands " | grep "\"command\": \"$2\"" \
         | { if [[ -n "${3:-}" ]]; then grep "\"target_version\": \"$3\""; else cat; fi; } \
-        | { if [[ -n "${4:-}" ]]; then grep "\"rollout_id\": $4,"; else cat; fi; } | grep -q .
+        | { if [[ -n "${4:-}" ]]; then grep "\"rollout_id\": $4,"; else cat; fi; } | grep -c . >/dev/null
 }
 
 rollout_state() { cp_psql -Atc "SELECT state FROM rollouts WHERE id = $1;"; }

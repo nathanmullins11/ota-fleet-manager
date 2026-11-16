@@ -57,7 +57,7 @@ attack() {
                  | sed -E "s/^[0-9:]+ $version check ([0-9])\/4 ([^:]*): ([A-Z]+).*/\1 \2 \3/" \
                  | sed -e 's/ OK$/ ✔/' -e 's/ FAILED$/ ✘/' | paste -sd'|' | sed 's/|/ · /g')
         proof "device-002's checks: ${checks:-not logged}"
-        if device_log device-002 "$since" "^[0-9:]+ $version downloaded package" | grep -q .; then
+        if device_log device-002 "$since" "^[0-9:]+ $version downloaded package" | grep -c . >/dev/null; then
             proof "it downloaded the package before refusing"
         else
             proof "it stopped before downloading the package: only the manifest and signature were fetched"
@@ -83,7 +83,7 @@ echo
 
 # Only meaningful if device-002 actually processed the commands: a device that ignores
 # every command also "stays on 1.0".
-if lines_since "$attack_mark" | grep -q " ota/devices/device-002/events "; then
+if lines_since "$attack_mark" | grep -c " ota/devices/device-002/events " >/dev/null; then
     m=$(listener_mark)
     sleep 6
     pid_after=$(firmware_pid device-002)
@@ -96,6 +96,17 @@ if lines_since "$attack_mark" | grep -q " ota/devices/device-002/events "; then
         check_fail "device-002 does not report 1.0 after the attacks" "$(observed "$m" device-002)"
     fi
     info "The orchestrator ignores device-002's replies: it never started rollouts 900001 or 900002."
+    if [[ "$CP_LOCAL" == 1 ]]; then
+        refused=$(cp_psql -Atc "SELECT count(*) FROM rejected_messages
+                                 WHERE kind = 'refused_command' AND device_id = 'device-002';")
+        if ((refused >= 2)); then
+            check_pass "Both refusals recorded as refused commands for the dashboard's Security panel"
+        else
+            check_fail "only ${refused:-0} of 2 refusals were recorded as refused commands"
+        fi
+    else
+        look_at_vm "the dashboard's Security section lists device-002's two refused commands."
+    fi
 else
     check_skip "device-002 still runs 1.0 after the attacks" \
                "it did not process the forged commands at all, so this proves nothing"

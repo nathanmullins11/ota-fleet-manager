@@ -23,6 +23,7 @@ SERVICES = {
     "agent": DEPLOY / "device-agent",
     "registry": DEPLOY / "registries" / "software",
     "tools": REPO / "tools",
+    "collector": DEPLOY / "stats-collector",
 }
 
 
@@ -126,6 +127,16 @@ def agent():
     return load_service_module("agent", "agent")
 
 
+@pytest.fixture(scope="session")
+def agent_resources():
+    return load_service_module("agent", "resources")
+
+
+@pytest.fixture(scope="session")
+def collector():
+    return load_service_module("collector", "collector")
+
+
 # --------------------------------------------------------------------------- signed test packages
 
 @pytest.fixture(scope="session")
@@ -172,7 +183,7 @@ def packages(release, signing_key, tmp_path_factory):
 
 POSTGRES = REPO / "deploy" / "registries" / "postgres"
 TABLES = ("rollout_events", "rollout_devices", "rollouts", "heartbeats", "devices",
-          "rollout_groups", "firmware_versions")
+          "rollout_groups", "firmware_versions", "rejected_messages", "control_plane_stats")
 
 
 def _dsn() -> str:

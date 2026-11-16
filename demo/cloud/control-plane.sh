@@ -43,6 +43,15 @@ start_control_plane() {
         ok "Created deploy/.env with a random database password."
     fi
 
+    # Dashboard passwords: added once if .env does not have them.
+    local name
+    for name in GRAFANA_ADMIN_PASSWORD GRAFANA_DB_PASSWORD; do
+        if ! grep -q "^$name=" "$ENV_FILE"; then
+            printf '%s=%s\n' "$name" "$(head -c 18 /dev/urandom | base64 | tr -d '/+=')" >>"$ENV_FILE"
+            ok "Added a random $name to deploy/.env"
+        fi
+    done
+
     # Update commands tell devices where to download firmware, so the orchestrator needs
     # the registry's public address. Set it once if .env does not have it.
     if ! grep -q "^REGISTRY_PUBLIC_URL=" "$ENV_FILE"; then
@@ -88,6 +97,8 @@ start_control_plane() {
     echo
     say "On your computer, from the repository root, run:"
     printf '\n      %sdemo/cloud/devices.sh %s%s\n\n' "$BOLD" "${ip:-<vm-ip>}" "$RESET"
+    printf '   Dashboard: %shttp://%s:3000%s  (view without login; admin password in deploy/.env)\n' \
+        "$BOLD" "${ip:-<vm-ip>}" "$RESET"
     info "The live view starts in a moment. Ctrl+C leaves it; the control plane keeps running."
     sleep 4
 }
@@ -96,7 +107,7 @@ render_view() {
     local ip=$1 message=$2
     printf '%s  OTA control plane  %s%s   %s%s%s\n' \
         "$BOLD$CYAN" "$ip" "$RESET" "$DIM" "$(date -u '+%H:%M:%S UTC')" "$RESET"
-    printf '  %sKeys: %sf%s faulty 2.1 to device-003   %su%s update fleet to 2.0   %sb%s roll back latest rollout   %sq%s leave view%s\n\n' \
+    printf '  %sKeys: %sf%s faulty 2.1 to devices 003, 005, 008   %su%s update fleet to 2.0   %sb%s roll back latest rollout   %sq%s leave view%s\n\n' \
         "$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET"
     if [[ -n "$message" ]]; then
         printf '%sLast action%s\n%s\n\n' "$BOLD" "$RESET" "$message" | sed '2,$s/^/   /'
@@ -179,8 +190,8 @@ run_key_action() {
             ;;
         f)
             # Errors up to 50 allowed, so the crash is what triggers the automatic rollback.
-            printf '$ cli.py rollout start 2.1 --devices device-003 --max-errors 50\n'
-            cp_compose exec -T orchestrator python cli.py rollout start 2.1 --devices device-003 \
+            printf '$ cli.py rollout start 2.1 --devices device-003,device-005,device-008 --max-errors 50\n'
+            cp_compose exec -T orchestrator python cli.py rollout start 2.1 --devices device-003,device-005,device-008 \
                 --max-errors 50 2>&1 \
                 | grep -v -E "^$|Follow it|cli.py rollout status"
             ;;

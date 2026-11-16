@@ -11,10 +11,12 @@ from conftest import load_service_module
 pytestmark = pytest.mark.component
 
 
-def heartbeat(version="1.0", status="healthy", errors=0, crashes=0, device="device-001"):
+def heartbeat(version="1.0", status="healthy", errors=0, crashes=0, device="device-001",
+              cpu=None, mem=None):
     msgs = load_service_module("orch", "messages")
     return msgs.Heartbeat(device_id=device, version=version, status=status, error_count=errors,
-                          crash_count=crashes, timestamp=datetime.now(UTC))
+                          crash_count=crashes, timestamp=datetime.now(UTC),
+                          cpu_percent=cpu, memory_mb=mem)
 
 
 def test_first_heartbeat_registers_the_device(orch_db, pg):
@@ -65,3 +67,32 @@ def test_reconnects_after_the_connection_is_lost(orch_db, pg):
                "WHERE pid <> pg_backend_pid() AND datname = current_database()")
     orch_db.record_heartbeat(heartbeat("2.0"))
     assert pg.execute("SELECT current_version FROM devices").fetchone()[0] == "2.0"
+
+
+
+def test_resource_use_is_stored_and_shown(orch_db, pg):
+    orch_db.record_heartbeat(heartbeat(cpu=1.5, mem=24.25))
+    assert pg.execute("SELECT cpu_percent, memory_mb FROM fleet_overview").fetchone() == (1.5, 24.25)
+    assert pg.execute("SELECT cpu_percent, memory_mb FROM heartbeats").fetchone() == (1.5, 24.25)
+    orch_db.record_heartbeat(heartbeat())               # an agent that does not report them
+    assert pg.execute("SELECT cpu_percent FROM devices").fetchone() == (None,)
+
+
+def test_rejected_messages_are_recorded(orch_db, pg):
+    orch_db.record_rejected("device-002", "ota/devices/device-002/heartbeat", "invalid_message",
+                            "heartbeat: payload is not valid JSON", b"not json" * 100)
+    row = pg.execute("SELECT device_id, kind, reason, length(payload) FROM rejected_messages").fetchone()
+    assert row == ("device-002", "invalid_message", "heartbeat: payload is not valid JSON", 300)
+
+
+def test_the_listener_records_what_it_rejects(orch_db, pg):
+    main = load_service_module("orch", "main")
+
+    class Msg:
+        topic = "ota/devices/device-002/heartbeat"
+        payload = b'{"schema_version": 1, "device_id": "device-999"}'
+
+    main.handle_message(Msg, orch_db)
+    kind, reason = pg.execute("SELECT kind, reason FROM rejected_messages").fetchone()
+    assert kind == "invalid_message" and "does not match topic" in reason
+    assert pg.execute("SELECT count(*) FROM devices").fetchone() == (0,)
