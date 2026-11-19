@@ -87,9 +87,9 @@ def lenient(logic):
                               max_failed_devices=99, unresponsive_seconds=3600)
 
 
-def start(store, logic, target, devices=None, rollback=None, limits=None):
+def start(store, logic, target, devices=None, rollback=None, limits=None, stages=None):
     plan = logic.plan_targets(store.devices(), target, devices, rollback)
-    return store.create_rollout(target, plan, "test", limits or lenient(logic))
+    return store.create_rollout(target, plan, "test", limits or lenient(logic), stages)
 
 
 def event(msgs, device, name, rid, version, reason=None):
@@ -596,3 +596,127 @@ def test_other_ignored_events_are_not_security_records(store, logic, pg, runner,
     runner.on_event(event(msgs, "device-001", "update_succeeded", 900001, "2.0"))  # unknown rollout
     runner.on_event(event(msgs, "device-001", "update_failed", rid, "2.1"))        # wrong version
     assert pg.execute("SELECT count(*) FROM rejected_messages").fetchone() == (0,)
+
+
+
+# --------------------------------------------------------------------------- staged rollout
+
+FLEET = [f"device-{i:03d}" for i in range(1, 11)]
+
+
+def sent_to(client, command="update"):
+    return sorted(d for d, c, _ in client.take() if c["command"] == command)
+
+
+def succeed(runner, msgs, rid, devices, version="2.0"):
+    for d in devices:
+        runner.on_event(event(msgs, d, "update_succeeded", rid, version))
+
+
+def stage_of(pg, rid):
+    return pg.execute("SELECT current_stage, stage_count FROM rollouts WHERE id = %s",
+                      (rid,)).fetchone()
+
+
+def test_a_staged_rollout_commands_one_stage_at_a_time(store, logic, pg, runner, client, msgs):
+    add_devices(pg, *FLEET)
+    rid = start(store, logic, "2.0", limits=strict(logic, window_seconds=0), stages="1,3,6")
+    assert "in 3 stages: stage 1: device-001; stage 2: device-002, device-003, device-004" \
+        in events(store, rid)[0][1]
+
+    runner.tick()
+    assert sent_to(client) == ["device-001"]                    # the canary only
+    assert stage_of(pg, rid) == (1, 3)
+    assert sorted(d for d, s in device_states(store, rid).items() if s == "pending") == FLEET[1:]
+
+    succeed(runner, msgs, rid, ["device-001"])
+    runner.tick()                                                # canary healthy -> stage 2
+    assert sent_to(client) == ["device-002", "device-003", "device-004"]
+    assert stage_of(pg, rid) == (2, 3)
+    assert events(store, rid)[-1] == (
+        "stage_advanced", "stage 1 finished: 1 of 1 device(s) healthy; starting stage 2 of 3: "
+                          "device-002, device-003, device-004")
+
+    succeed(runner, msgs, rid, FLEET[1:4])
+    runner.tick()
+    assert sent_to(client) == FLEET[4:]                          # the remaining six
+    succeed(runner, msgs, rid, FLEET[4:])
+    runner.tick()
+    assert rollout_state(pg, rid) == "completed"
+    assert events(store, rid)[-1] == ("completed", "10 of 10 devices updated and healthy")
+
+
+def test_the_next_stage_waits_for_the_health_window(store, logic, pg, runner, client, msgs):
+    add_devices(pg, *FLEET[:4])
+    rid = start(store, logic, "2.0", limits=strict(logic), stages="1,3")
+    runner.tick()
+    client.take()
+    succeed(runner, msgs, rid, ["device-001"])
+    runner.tick()
+    assert client.take() == [] and stage_of(pg, rid) == (1, 2)   # still in its 60 s window
+    age_window(pg, rid, 61)
+    runner.tick()
+    assert sent_to(client) == FLEET[1:4]
+
+
+def test_a_crashing_canary_stops_the_rollout_there(store, logic, pg, runner, client, msgs):
+    """Iteration 3 final test: 2.1 reaches the canary only; the rest never receive it."""
+    add_devices(pg, *FLEET)
+    rid = start(store, logic, "2.1", limits=strict(logic), stages="1,3,6")
+    runner.tick()
+    client.take()
+    succeed(runner, msgs, rid, ["device-001"], "2.1")
+    heartbeat(pg, "device-001", "2.1", crashes=1, status="unhealthy")
+    runner.tick()
+
+    sent = client.take()
+    assert [(d, c["command"]) for d, c, _ in sent] == [("device-001", "rollback")]
+    r = store.rollout(rid)
+    assert r["state"] == "halted"
+    assert r["halt_reason"].startswith("automatic (stage 1 of 3): device-001 unhealthy: crashed 1 time")
+    assert sorted(d for d, s in device_states(store, rid).items() if s == "skipped") == FLEET[1:]
+
+    runner.on_event(event(msgs, "device-001", "rollback_succeeded", rid, "1.0"))
+    runner.tick()
+    assert rollout_state(pg, rid) == "rolled_back"
+    assert events(store, rid)[-1] == (
+        "rollback_completed", "1 of 1 devices rolled back; 9 in later stages never received the update")
+
+
+def test_a_halt_in_stage_two_rolls_back_stages_one_and_two(store, logic, pg, runner, client, msgs):
+    add_devices(pg, *FLEET)
+    rid = start(store, logic, "2.1", limits=strict(logic, window_seconds=0), stages="1,3,6")
+    runner.tick()
+    succeed(runner, msgs, rid, ["device-001"], "2.1")
+    runner.tick()                                                # stage 2 starts
+    client.take()
+    succeed(runner, msgs, rid, FLEET[1:4], "2.1")
+    heartbeat(pg, "device-003", "2.1", crashes=1)
+    runner.tick()
+    assert sent_to(client, "rollback") == FLEET[:4]
+    assert store.rollout(rid)["halt_reason"].startswith("automatic (stage 2 of 3): device-003")
+    assert sum(1 for s in device_states(store, rid).values() if s == "skipped") == 6
+
+
+def test_a_device_offline_when_its_stage_starts_is_not_commanded(store, logic, pg, runner, client, msgs):
+    add_devices(pg, *FLEET[:4])
+    rid = start(store, logic, "2.0", limits=strict(logic, window_seconds=0), stages="1,3")
+    runner.tick()
+    client.take()
+    # device-003 drops off while stage 1 is still running.
+    pg.execute("UPDATE devices SET status = 'offline' WHERE device_id = 'device-003'")
+    succeed(runner, msgs, rid, ["device-001"])
+    runner.tick()
+    assert sent_to(client) == ["device-002", "device-004"]
+    assert verdicts(store, rid)["device-003"] == "not_reached"
+    assert "offline, not commanded: device-003" in events(store, rid)[-1][1]
+    succeed(runner, msgs, rid, ["device-002", "device-004"])
+    runner.tick()
+    assert rollout_state(pg, rid) == "completed"
+
+
+def test_bad_stage_plan_creates_no_rollout(store, logic, pg):
+    add_devices(pg, *FLEET[:3])
+    with pytest.raises(logic.RolloutError, match="not both"):
+        start(store, logic, "2.0", stages="1,50%")
+    assert pg.execute("SELECT count(*) FROM rollouts").fetchone() == (0,)

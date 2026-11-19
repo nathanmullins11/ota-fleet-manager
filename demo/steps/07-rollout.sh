@@ -104,7 +104,7 @@ if [[ "$SIMULATE" == 1 ]]; then
     return 0
 fi
 
-step "Rollout 2.0: every device installs the update" \
+step "Staged rollout of 2.0: 1, then 3, then 6 devices, each stage gated on health" \
      "Orchestrator commands, FR-3 download/verify/install/report, NF-5"
 
 say "The orchestrator sends each device its own update command (download, manifest and"
@@ -128,9 +128,13 @@ say "healthy, so it gets a command it will never answer. That must not count as 
 run_note "docker stop $(container_of "$DROPPED")"
 docker stop "$(container_of "$DROPPED")" >/dev/null
 echo
-if begin_rollout 2.0 u "update every online device to 2.0" --all; then
+say "Rolling out 2.0 in three stages: device-001 first, then three devices, then the rest. Each"
+say "stage starts only when every device in the previous one has passed its health window."
+if begin_rollout 2.0 u "update the fleet to 2.0 in stages" --all --stages 1,3,6; then
     ROLLOUT_RID=$RID
-    mapfile -t ROLLOUT_TARGETS < <(commanded_devices update "$RID")
+    # Every device in the fleet is in this rollout; only stage 1 is commanded so far.
+    ROLLOUT_TARGETS=()
+    for i in $(seq 1 "$DEVICE_COUNT"); do ROLLOUT_TARGETS+=("$(device_id "$i")"); done
     # The devices expected to update: every target except the one that dropped off.
     ROLLOUT_UPDATED=()
     for d in "${ROLLOUT_TARGETS[@]}"; do [[ "$d" == "$DROPPED" ]] || ROLLOUT_UPDATED+=("$d"); done
@@ -214,10 +218,23 @@ if begin_rollout 2.0 u "update every online device to 2.0" --all; then
             check_fail "only ${healthy:-0} of ${#ROLLOUT_UPDATED[@]} devices were judged healthy" \
                        "$(cp_psql -Atc "SELECT string_agg(device_id || ' ' || coalesce(verdict, 'no verdict'), ', ') FROM rollout_devices WHERE rollout_id = $RID;")"
         fi
+        # Staged rollout: two stage advances, each only after the previous stage was all healthy.
+        advances=$(cp_psql -Atc "SELECT count(*) FROM rollout_events WHERE rollout_id = $RID AND event = 'stage_advanced';")
+        early=$(cp_psql -Atc "SELECT count(*) FROM rollout_events e WHERE e.rollout_id = $RID
+                                AND e.event = 'stage_advanced'
+                                AND e.created_at < (SELECT max(verdict_at) FROM rollout_devices rd
+                                                     WHERE rd.rollout_id = $RID AND rd.stage = e.stage - 1);")
+        if [[ "$advances" == 2 && "$early" == 0 ]]; then
+            check_pass "Ran in 3 stages: each stage started only after every device in the previous one passed its health window"
+        else
+            check_fail "the stages did not advance as planned" "stage advances: ${advances:-0}; advanced before the previous stage was judged: ${early:-?}"
+        fi
+        cp_psql -Atc "SELECT to_char(created_at, 'HH24:MI:SS') || '  ' || reason FROM rollout_events
+                       WHERE rollout_id = $RID AND event = 'stage_advanced' ORDER BY id;" | cut -c1-150 | indent
         verdict=$(cp_psql -Atc "SELECT coalesce(verdict, 'none') FROM rollout_devices
                                  WHERE rollout_id = $RID AND device_id = '$DROPPED';")
         if [[ "$verdict" == not_reached && "$(rollout_state "$RID")" == completed ]]; then
-            check_pass "$DROPPED was 'not reached' (offline, not a failed update), and the rollout completed without a rollback"
+            check_pass "$DROPPED was 'not reached' (offline when its stage started, so never commanded), and the rollout completed without a rollback"
         else
             check_fail "$DROPPED's dropout was not handled as offline" \
                        "verdict: $verdict; rollout state: $(rollout_state "$RID")"

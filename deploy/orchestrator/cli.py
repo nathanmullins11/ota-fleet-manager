@@ -5,6 +5,7 @@
   docker compose exec orchestrator python cli.py rollout start 2.0 --all
   docker compose exec orchestrator python cli.py rollout start 2.0 --devices device-001,device-002
   docker compose exec orchestrator python cli.py rollout start 2.1 --all --max-errors 50 --health-window 30
+  docker compose exec orchestrator python cli.py rollout start 2.0 --all --stages 1,3,6
   docker compose exec orchestrator python cli.py rollout status [ID] [--watch]
   docker compose exec orchestrator python cli.py rollout list
   docker compose exec orchestrator python cli.py rollout rollback ID [--reason TEXT]
@@ -20,7 +21,8 @@ import time
 from config import load_config
 from db import Database
 from registry import RegistryError, fetch_versions
-from rollout_logic import HealthLimits, RolloutError, plan_targets
+from rollout_logic import (HealthLimits, RolloutError, assign_stages, describe_stages,
+                           plan_targets, stage_sizes)
 from rollouts import RolloutStore
 
 TERMINAL_STATES = ("completed", "rolled_back")
@@ -80,12 +82,17 @@ def cmd_start(cfg, store, args) -> int:
         window_seconds=args.health_window, max_crashes=args.max_crashes,
         max_errors=args.max_errors, max_failed_devices=args.max_failed,
         unresponsive_seconds=args.unresponsive)
-    rid = store.create_rollout(args.version, plan, origin="manual", limits=limits)
+    rid = store.create_rollout(args.version, plan, origin="manual", limits=limits,
+                               stages=args.stages)
+    stages = assign_stages(plan.to_command, stage_sizes(args.stages, len(plan.to_command)))
 
     print(f"Rollout {rid} created: update to {args.version}, rollback version "
           f"{plan.rollback_version}")
     print(f"  health limits:     {limits.describe()}")
-    print(f"  commanding:        {', '.join(plan.to_command)}")
+    if max(stages.values()) > 1:
+        print(f"  stages:            {describe_stages(stages)}")
+    else:
+        print(f"  commanding:        {', '.join(plan.to_command)}")
     if plan.already_on_target:
         print(f"  already on {args.version}:   {', '.join(plan.already_on_target)}")
     if plan.skipped_offline:
@@ -109,13 +116,16 @@ def _print_status(store, rid: int) -> str:
     print(f"Rollout {rid}: {r['state'].upper()}   update to {r['target_version']}, "
           f"rollback version {r['rollback_version']}   started {_time(r['started_at'])}"
           + (f"   ended {_time(r['ended_at'])}" if r["ended_at"] else ""))
+    if r["stage_count"] > 1:
+        print(f"Stage {r['current_stage']} of {r['stage_count']}   (plan: {r['stage_plan']})")
     if r["halt_reason"]:
         print(f"Halted: {r['halt_reason']}")
     print(f"Health limits: {store.limits(rid, HealthLimits()).describe()}")
     print()
-    _table(["device", "rollout state", "reports version", "device status", "health", "since"],
-           [(d, s, v, st, verdict or ("watching" if s == "updated" else ""), _time(t))
-            for d, s, v, st, verdict, _reason, t in store.device_details(rid)])
+    _table(["device", "stage", "rollout state", "reports version", "device status", "health",
+            "since"],
+           [(d, stage, s, v, st, verdict or ("watching" if s == "updated" else ""), _time(t))
+            for d, stage, s, v, st, verdict, _reason, t in store.device_details(rid)])
     print()
     _table(["time", "decision", "reason"],
            [(_time(t), e, reason) for t, e, reason in store.events(rid)])
@@ -168,6 +178,11 @@ def main(argv=None) -> int:
     who.add_argument("--devices", help="comma-separated device IDs")
     p.add_argument("--rollback-to", help="version to roll back to (default: the version the "
                                          "devices run now)")
+    p.add_argument("--stages", metavar="PLAN",
+                   help="roll out in stages, devices in ID order: sizes such as 1,3,6, or the "
+                        "share of devices reached by each stage such as 10%%,50%%,100%%. "
+                        "The next stage starts when every device in the current one is healthy "
+                        "(default: one stage)")
     health = p.add_argument_group("health limits (default: the orchestrator's HEALTH_* settings)")
     health.add_argument("--health-window", type=int, metavar="S",
                         help="watch each device this many seconds after it updates")

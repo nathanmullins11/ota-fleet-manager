@@ -30,14 +30,16 @@ if [[ "$SIMULATE" == 1 ]]; then
     return 0
 fi
 
-step "Faulty firmware 2.1: the crash is reported, and the orchestrator rolls back by itself" \
-     "FR-3 install, FR-4 health evaluation, FR-5 automatic rollback, FR-8 device registry"
+step "Faulty firmware 2.1: stopped at the canary group and rolled back automatically" \
+     "FR-2 staged rollout, FR-4 health evaluation, FR-5 automatic rollback, FR-8 device registry"
 
-FAULTY=(device-003 device-005 device-008)
-say "Rolling out the faulty firmware 2.1 to ${FAULTY[*]}. Expected (firmware/README.md):"
-say "each installs and reports 2.1, runs healthy for ~10 s, reports errors, crashes at ~15 s, and"
-say "its agent keeps sending heartbeats with crash_count. The orchestrator watches each updated"
-say "device for a health window and rolls back as soon as one crosses a limit: here, any crash."
+# Staged rollout (FR-2): the canary group is the first stage, devices in ID order.
+FAULTY=(device-001 device-002 device-003)
+say "Rolling out the faulty firmware 2.1 to the whole fleet in stages (3, then 3, then the rest)."
+say "Only the canary group (${FAULTY[*]}) gets it first. Expected (firmware/README.md): each"
+say "installs 2.1, runs healthy for ~10 s, reports errors, crashes at ~15 s. The orchestrator"
+say "watches the canaries for a health window, halts as soon as one crosses a limit (here, any"
+say "crash) and rolls them back; the other devices must never receive 2.1."
 info "(Up to 50 errors are allowed for this rollout, so a crash is what triggers the rollback.)"
 echo
 mark=$(listener_mark)
@@ -56,8 +58,8 @@ first_crash() {
     done
     return 1
 }
-if begin_rollout 2.1 f "faulty 2.1 to ${FAULTY[*]}" \
-        --devices "$(IFS=,; echo "${FAULTY[*]}")" --max-errors 50; then
+if begin_rollout 2.1 f "faulty 2.1 to the fleet, in stages" \
+        --all --stages 3,3,4 --max-errors 50; then
     crash_rid=$RID
     if expect "$(event_timeout)" "${FAULTY[0]} installs 2.1 and reports update_succeeded" \
             "$mark" "${FAULTY[0]}" event_seen "$mark" "${FAULTY[0]}" update_succeeded "$crash_rid"; then
@@ -140,8 +142,9 @@ if begin_rollout 2.1 f "faulty 2.1 to ${FAULTY[*]}" \
         sleep 1
         if [[ "$CP_LOCAL" == 1 ]]; then
             reason=$(cp_psql -Atc "SELECT halt_reason FROM rollouts WHERE id = $crash_rid;")
-            if [[ "$reason" == automatic:* ]]; then
-                check_pass "The orchestrator rolled back automatically: ${reason#automatic: }"
+            # "automatic: ..." or, for a staged rollout, "automatic (stage 1 of 3): ..."
+            if [[ "$reason" == automatic* ]]; then
+                check_pass "The orchestrator rolled back automatically: ${reason#automatic*: }"
             else
                 check_fail "rollout $crash_rid was rolled back, but not by the health rules" \
                            "halt reason: ${reason:-none}"
@@ -173,13 +176,31 @@ if begin_rollout 2.1 f "faulty 2.1 to ${FAULTY[*]}" \
                 fi
             done
             if ((back == ${#FAULTY[@]})); then
-                check_pass "All ${#FAULTY[@]} devices run firmware 1.0 again, restored from their kept copy without a download"
+                check_pass "All ${#FAULTY[@]} canaries run firmware 1.0 again, restored from their kept copy without a download"
             else
                 check_fail "only $back of ${#FAULTY[@]} devices restored 1.0 from their kept copy" "${notes[*]}"
             fi
         fi
+        # Iteration 3 final test: the rest of the fleet never received 2.1 ...
+        mapfile -t got_update < <(commanded_devices update "$crash_rid")
+        others=$((DEVICE_COUNT - ${#FAULTY[@]}))
+        if [[ "${got_update[*]}" == "${FAULTY[*]}" ]]; then
+            check_pass "The other $others devices never received 2.1: update commands went only to the canary group"
+        else
+            check_fail "devices outside the canary group received 2.1" "update commands sent to: ${got_update[*]}"
+        fi
         if [[ "$CP_LOCAL" == 1 ]]; then
             wait_until 30 "waiting for the rollback to finish" rollout_state_is "$crash_rid" rolled_back || true
+            # ... and the canaries were back on 1.0 within 60 s of updating.
+            took=$(cp_psql -Atc "SELECT round(EXTRACT(EPOCH FROM (
+                        (SELECT min(created_at) FROM rollout_events WHERE rollout_id = $crash_rid
+                            AND event = 'rollback_completed')
+                      - (SELECT min(window_started_at) FROM rollout_devices WHERE rollout_id = $crash_rid))))")
+            if [[ -n "$took" ]] && ((took <= 60)); then
+                check_pass "Rolled back within 60 s: ${took} s from the canaries updating to the rollback completing"
+            else
+                check_fail "the rollback did not complete within 60 s of the canaries updating" "took: ${took:-unknown} s"
+            fi
             say "The orchestrator's decision log for rollout $crash_rid:"
             cp_psql -Atc "SELECT to_char(created_at, 'HH24:MI:SS') || '  ' || event || ': ' || coalesce(reason, '')
                             FROM rollout_events WHERE rollout_id = $crash_rid ORDER BY id;" \

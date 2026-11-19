@@ -107,7 +107,7 @@ render_view() {
     local ip=$1 message=$2
     printf '%s  OTA control plane  %s%s   %s%s%s\n' \
         "$BOLD$CYAN" "$ip" "$RESET" "$DIM" "$(date -u '+%H:%M:%S UTC')" "$RESET"
-    printf '  %sKeys: %sf%s faulty 2.1 to devices 003, 005, 008   %su%s update fleet to 2.0   %sb%s roll back latest rollout   %sq%s leave view%s\n\n' \
+    printf '  %sKeys: %sf%s faulty 2.1, staged (canary 3)   %su%s staged update to 2.0   %sb%s roll back latest rollout   %sq%s leave view%s\n\n' \
         "$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET"
     if [[ -n "$message" ]]; then
         printf '%sLast action%s\n%s\n\n' "$BOLD" "$RESET" "$message" | sed '2,$s/^/   /'
@@ -184,14 +184,14 @@ render_rollout() {
 run_key_action() {
     case "$1" in
         u)
-            printf '$ cli.py rollout start 2.0 --all\n'
-            cp_compose exec -T orchestrator python cli.py rollout start 2.0 --all 2>&1 \
+            printf '$ cli.py rollout start 2.0 --all --stages 1,3,6\n'
+            cp_compose exec -T orchestrator python cli.py rollout start 2.0 --all --stages 1,3,6 2>&1 \
                 | grep -v -E "^$|Follow it|cli.py rollout status"
             ;;
         f)
             # Errors up to 50 allowed, so the crash is what triggers the automatic rollback.
-            printf '$ cli.py rollout start 2.1 --devices device-003,device-005,device-008 --max-errors 50\n'
-            cp_compose exec -T orchestrator python cli.py rollout start 2.1 --devices device-003,device-005,device-008 \
+            printf '$ cli.py rollout start 2.1 --all --stages 3,3,4 --max-errors 50\n'
+            cp_compose exec -T orchestrator python cli.py rollout start 2.1 --all --stages 3,3,4 \
                 --max-errors 50 2>&1 \
                 | grep -v -E "^$|Follow it|cli.py rollout status"
             ;;

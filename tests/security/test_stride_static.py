@@ -204,10 +204,12 @@ def tracked_files():
 
 
 def test_I1_no_private_key_is_committed():
+    # Built from two parts so this test file does not contain the marker it searches for.
+    marker = b"PRIVATE " + b"KEY-----"
     leaks = []
     for path in tracked_files():
         try:
-            if b"PRIVATE KEY-----" in path.read_bytes():
+            if marker in path.read_bytes():
                 leaks.append(str(path.relative_to(REPO_ROOT)))
         except OSError:
             continue

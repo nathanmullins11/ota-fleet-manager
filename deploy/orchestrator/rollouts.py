@@ -15,9 +15,10 @@ from db import Database
 from messages import Event
 from registry import FirmwareVersion
 from rollout_logic import (ACTIVE_STATES, DeviceHealth, DeviceRow, HealthLimits, RolloutError,
-                           TargetPlan, apply_event, build_command, check_can_roll_back,
-                           check_can_start, classify_no_answer, evaluate_device,
-                           health_decision, outcome)
+                           TargetPlan, apply_event, assign_stages, build_command,
+                           check_can_roll_back, check_can_start, classify_no_answer,
+                           describe_stages, evaluate_device, health_decision, outcome,
+                           stage_finished, stage_sizes)
 from topics import command_topic
 
 log = logging.getLogger("orchestrator.rollouts")
@@ -62,11 +63,12 @@ class RolloutStore:
     def rollout(self, rollout_id: int) -> Optional[dict]:
         row = self.db.run(lambda conn: conn.execute(
             "SELECT id, target_version, rollback_version, state, halt_reason, started_at, "
-            "ended_at FROM rollouts WHERE id = %s", (rollout_id,)).fetchone())
+            "ended_at, current_stage, stage_count, stage_plan FROM rollouts WHERE id = %s",
+            (rollout_id,)).fetchone())
         if row is None:
             return None
         keys = ("id", "target_version", "rollback_version", "state", "halt_reason",
-                "started_at", "ended_at")
+                "started_at", "ended_at", "current_stage", "stage_count", "stage_plan")
         return dict(zip(keys, row, strict=True))
 
     def rollouts(self, limit: int = 10) -> list[tuple]:
@@ -103,10 +105,17 @@ class RolloutStore:
 
     def device_details(self, rollout_id: int) -> list[tuple]:
         return self.db.run(lambda conn: conn.execute(
-            "SELECT rd.device_id, rd.state, d.current_version, d.status, rd.verdict, "
+            "SELECT rd.device_id, rd.stage, rd.state, d.current_version, d.status, rd.verdict, "
             "       rd.verdict_reason, rd.updated_at "
             "  FROM rollout_devices rd JOIN devices d USING (device_id) "
-            " WHERE rd.rollout_id = %s ORDER BY rd.device_id", (rollout_id,)).fetchall())
+            " WHERE rd.rollout_id = %s ORDER BY rd.stage, rd.device_id", (rollout_id,)).fetchall())
+
+    def stage_devices(self, rollout_id: int, stage: int) -> list[tuple]:
+        """(device_id, state, verdict) for each device in one stage of a rollout."""
+        return self.db.run(lambda conn: conn.execute(
+            "SELECT device_id, state, verdict FROM rollout_devices "
+            " WHERE rollout_id = %s AND stage = %s ORDER BY device_id",
+            (rollout_id, stage)).fetchall())
 
     def events(self, rollout_id: int) -> list[tuple]:
         return self.db.run(lambda conn: conn.execute(
@@ -116,10 +125,14 @@ class RolloutStore:
     # ----------------------------------------------------------------- requests (cli.py)
 
     def create_rollout(self, target_version: str, plan: TargetPlan, origin: str,
-                       limits: Optional[HealthLimits] = None) -> int:
-        """Record a pending rollout and the health limits it is judged by; the orchestrator
-        sends the commands."""
+                       limits: Optional[HealthLimits] = None,
+                       stages: Optional[str] = None) -> int:
+        """Record a pending rollout, its stages (device-ID order) and the health limits it is
+        judged by; the orchestrator sends the commands. stages: e.g. '1,3,6' or
+        '10%,50%,100%'; None for a single stage."""
         limits = limits or HealthLimits()
+        sizes = stage_sizes(stages, len(plan.to_command))
+        assignment = assign_stages(plan.to_command, sizes)
         def work(conn):
             with conn.transaction():
                 # Serializes concurrent creates, so "one active rollout" holds.
@@ -131,17 +144,18 @@ class RolloutStore:
                 rid = conn.execute(
                     "INSERT INTO rollouts (target_version, rollback_version, "
                     "  health_window_seconds, max_crashes, max_errors, max_failed_devices, "
-                    "  unresponsive_seconds) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    "  unresponsive_seconds, stage_count, stage_plan) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                     (target_version, plan.rollback_version, limits.window_seconds,
                      limits.max_crashes, limits.max_errors, limits.max_failed_devices,
-                     limits.unresponsive_seconds)).fetchone()[0]
+                     limits.unresponsive_seconds, len(sizes), stages)).fetchone()[0]
                 for device_id in plan.to_command:
-                    conn.execute("INSERT INTO rollout_devices (rollout_id, device_id) "
-                                 "VALUES (%s, %s)", (rid, device_id))
+                    conn.execute("INSERT INTO rollout_devices (rollout_id, device_id, stage) "
+                                 "VALUES (%s, %s, %s)", (rid, device_id, assignment[device_id]))
                 conn.execute(
                     "INSERT INTO rollout_events (rollout_id, event, stage, reason) "
                     "VALUES (%s, 'started', 0, %s)",
-                    (rid, _start_reason(origin, target_version, plan, limits)))
+                    (rid, _start_reason(origin, target_version, plan, limits, assignment)))
                 return rid
         return self.db.run(work)
 
@@ -161,9 +175,12 @@ class RolloutStore:
         self.db.run(work)
 
 
-def _start_reason(origin: str, target: str, plan: TargetPlan, limits: HealthLimits) -> str:
+def _start_reason(origin: str, target: str, plan: TargetPlan, limits: HealthLimits,
+                  stages: Optional[dict] = None) -> str:
     parts = [f"{origin}: update to {target} for {len(plan.to_command)} device(s)",
              f"rollback version {plan.rollback_version}", f"health: {limits.describe()}"]
+    if stages and max(stages.values()) > 1:
+        parts.append(f"in {max(stages.values())} stages: {describe_stages(stages)}")
     if plan.skipped_offline:
         parts.append(f"skipped offline: {', '.join(plan.skipped_offline)}")
     if plan.already_on_target:
@@ -193,6 +210,7 @@ class RolloutRunner:
         self._expire_commands()
         self._evaluate_health()
         self._apply_health_rules()
+        self._advance_stages()          # only a rollout the health rules let continue
         self._send_rollbacks()          # same tick as an automatic halt
         self._finish_rollouts()
 
@@ -202,14 +220,15 @@ class RolloutRunner:
             # fast device's event never finds its row still pending.
             with conn.transaction():
                 rows = conn.execute(
-                    "UPDATE rollouts SET state = 'in_progress', started_at = now() "
+                    "UPDATE rollouts SET state = 'in_progress', started_at = now(), "
+                    "       current_stage = 1 "
                     " WHERE state = 'pending' RETURNING id, target_version").fetchall()
                 claimed = []
                 for rid, target in rows:
                     ids = [r[0] for r in conn.execute(
                         "UPDATE rollout_devices SET state = 'commanded', updated_at = now() "
-                        " WHERE rollout_id = %s AND state = 'pending' RETURNING device_id",
-                        (rid,)).fetchall()]
+                        " WHERE rollout_id = %s AND state = 'pending' AND stage = 1 "
+                        "RETURNING device_id", (rid,)).fetchall()]
                     claimed.append((rid, target, sorted(ids)))
                 return claimed
 
@@ -230,9 +249,13 @@ class RolloutRunner:
                     " FOR UPDATE").fetchall()
                 claimed = []
                 for rid, version, reason in rows:
+                    # Devices in stages not reached yet never got the update: nothing to undo.
+                    conn.execute("UPDATE rollout_devices SET state = 'skipped', updated_at = now() "
+                                 " WHERE rollout_id = %s AND state = 'pending'", (rid,))
                     ids = [r[0] for r in conn.execute(
                         "UPDATE rollout_devices SET state = 'commanded', updated_at = now() "
-                        " WHERE rollout_id = %s RETURNING device_id", (rid,)).fetchall()]
+                        " WHERE rollout_id = %s AND state <> 'skipped' RETURNING device_id",
+                        (rid,)).fetchall()]
                     conn.execute(
                         "INSERT INTO rollout_events (rollout_id, event, reason) "
                         "VALUES (%s, 'rollback_started', %s)",
@@ -336,12 +359,72 @@ class RolloutRunner:
                                      self.store.limits(rid, self.default_limits))
             if reason is None:
                 continue
+            r = self.store.rollout(rid)
+            if r["stage_count"] > 1:
+                reason = reason.replace(
+                    "automatic:", f"automatic (stage {r['current_stage']} of {r['stage_count']}):", 1)
             try:
                 self.store.request_rollback(rid, reason)
             except RolloutError as exc:          # finished or halted meanwhile
                 log.info("Rollout %d: automatic rollback not needed (%s)", rid, exc)
                 continue
             log.warning("Rollout %d halted: %s", rid, reason)
+
+    def _advance_stages(self) -> None:
+        """Start the next stage of each rollout whose current stage has finished (FR-2)."""
+        rows = self.store.db.run(lambda conn: conn.execute(
+            "SELECT id, current_stage, stage_count, target_version FROM rollouts "
+            " WHERE state = 'in_progress' AND current_stage >= 1 "
+            "   AND current_stage < stage_count").fetchall())
+        for rid, stage, count, target in rows:
+            done = self.store.stage_devices(rid, stage)
+            if not stage_finished([(state, verdict) for _, state, verdict in done]):
+                continue
+            healthy = [d for d, _, v in done if v == "healthy"]
+            failed = [d for d, s, _ in done if s == "failed"]
+            nxt, total = stage + 1, len(done)
+
+            def work(conn, rid=rid, stage=stage, nxt=nxt, count=count, healthy=healthy,
+                     failed=failed, total=total):
+                with conn.transaction():
+                    if not conn.execute(
+                            "UPDATE rollouts SET current_stage = %s WHERE id = %s "
+                            "   AND current_stage = %s AND state = 'in_progress'",
+                            (nxt, rid, stage)).rowcount:
+                        return None
+                    # A device already offline when its stage starts would never get the
+                    # command: judge it 'not reached' now instead of waiting for a timeout.
+                    offline = [r[0] for r in conn.execute(
+                        "UPDATE rollout_devices rd SET state = 'failed', verdict = 'not_reached', "
+                        "       verdict_reason = %s, verdict_at = now(), updated_at = now() "
+                        "  FROM devices d WHERE d.device_id = rd.device_id "
+                        "   AND rd.rollout_id = %s AND rd.stage = %s AND rd.state = 'pending' "
+                        "   AND d.status IN ('offline', 'unknown') RETURNING rd.device_id",
+                        (f"offline when stage {nxt} started; not commanded", rid, nxt)).fetchall()]
+                    for device_id in offline:
+                        _record_verdict(conn, rid, device_id, "not_reached",
+                                        f"offline when stage {nxt} started; not commanded")
+                    ids = sorted(r[0] for r in conn.execute(
+                        "UPDATE rollout_devices SET state = 'commanded', updated_at = now() "
+                        " WHERE rollout_id = %s AND stage = %s AND state = 'pending' "
+                        "RETURNING device_id", (rid, nxt)).fetchall())
+                    reason = (f"stage {stage} finished: {len(healthy)} of {total} device(s) healthy"
+                              + (f", failed: {', '.join(failed)}" if failed else "")
+                              + f"; starting stage {nxt} of {count}: "
+                              + (", ".join(ids) if ids else "no online devices")
+                              + (f"; offline, not commanded: {', '.join(offline)}" if offline else ""))
+                    conn.execute("INSERT INTO rollout_events (rollout_id, event, stage, reason) "
+                                 "VALUES (%s, 'stage_advanced', %s, %s)", (rid, nxt, reason))
+                    return ids, reason
+
+            result = self.store.db.run(work)
+            if result is None:
+                continue
+            ids, reason = result
+            log.info("Rollout %d: %s", rid, reason)
+            sha = self._sha(target)
+            for device_id in ids:
+                self._publish(rid, device_id, "update", target, sha)
 
     def _finish_rollouts(self) -> None:
         rows = self.store.db.run(lambda conn: conn.execute(
