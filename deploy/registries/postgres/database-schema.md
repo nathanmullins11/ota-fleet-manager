@@ -142,7 +142,14 @@ Four seeded stages: `canary` (1), `stage_10` (2), `stage_50` (3), `stage_100` (4
 
 Used from Iteration 2 for manual rollouts (`orchestrator/cli.py`); Iteration 3 adds stages and automatic halts.
 
-**Life cycle** (`rollouts.state`): `pending` (created by the CLI) → `in_progress` (commands sent) → `completed` (every device answered). A rollback request sets `halted`; once every device has answered the rollback commands, `rolled_back`. Per device (`rollout_devices.state`): `pending` → `commanded` → `updated` or `failed`; after a rollback request `commanded` → `rolled_back` or `failed`. The rules are in `orchestrator/rollout_logic.py`. When a device reports `update_succeeded`, `devices.previous_version` is set to the rollout's `rollback_version`. Health evaluation (migration `002_health_evaluation.sql`): `rollouts` stores the health limits it is judged by (`health_window_seconds`, `max_crashes`, `max_errors`, `max_failed_devices`, `unresponsive_seconds`); `rollout_devices` gets `window_started_at` (when `update_succeeded` arrived) and a `verdict` (`healthy`, `unhealthy`, `unresponsive`, `failed_update`, `no_reply`, `not_reached`) with `verdict_reason` and `verdict_at`. Each verdict is also a `device_verdict` entry in `rollout_events`. An automatic halt is a `halted` event whose reason starts with `automatic:`.
+**Life cycle** (`rollouts.state`): `pending` (created by the CLI) → `in_progress` (commands sent) → `completed` (every device answered). A rollback request sets `halted`; once every device has answered the rollback commands, `rolled_back`. Per device (`rollout_devices.state`): `pending` → `commanded` → `updated` or `failed`; after a rollback request `commanded` → `rolled_back` or `failed`. The rules are in `orchestrator/rollout_logic.py`. When a device reports `update_succeeded`, `devices.previous_version` is set to the rollout's `rollback_version`. Health evaluation (migration `002_health_evaluation.sql`): `rollouts` stores the health limits it is judged by (`health_window_seconds`, `max_crashes`, `max_errors`, `max_failed_devices`, `unresponsive_seconds`); `rollout_devices` gets `window_started_at` (when `update_succeeded` arrived) and a `verdict` (`healthy`, `unhealthy`, `unresponsive`, `failed_update`, `no_reply`, `not_reached`) with `verdict_reason` and `verdict_at`. Each verdict is also a `device_verdict` entry in `rollout_events`. An automatic halt is a `halted` event whose reason starts with `automatic:` (or `automatic (stage N of M):` in a staged rollout).
+
+### Staged rollout (migration `004_staged_rollout.sql`)
+
+- `rollouts.stage_count` and `rollouts.stage_plan` (as given, e.g. `1,3,6`); `rollouts.current_stage` is the stage being rolled out (1 = first).
+- `rollout_devices.stage`: the stage the device is updated in (assigned in device-ID order).
+- `rollout_devices.state` gains `skipped`: a device in a later stage that never received the update because the rollout halted first.
+- Each stage change is a `stage_advanced` event in `rollout_events`, with the stage it starts and why.
 
 ### `rejected_messages`, `control_plane_stats` (migration `003_resources_and_security.sql`)
 

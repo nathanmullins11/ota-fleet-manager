@@ -9,7 +9,7 @@ Scripted demos of the OTA Update Fleet Manager in two setups:
 
 Each step says what is about to happen and which requirement it covers, does it, and shows the result. By default the script waits for **Enter** before each step so you can talk; `--auto` runs straight through (about 4 minutes).
 
-**Real by default, `--simulate` for a clean run.** By default the demo checks what the devices *really* do: install firmware, report crashes, roll back, refuse forged commands. Anything they do not do is printed in red as **✘ NOT WORKING**, with what was seen instead, and the demo carries on; the summary lists every check. With the device update logic in place, a local run passes every check (88 with 10 devices). `--simulate` keeps the earlier behaviour: the demo fakes the device replies and the crash heartbeat (marked SIMULATED), for presenting before that work lands.
+**Real by default, `--simulate` for a clean run.** By default the demo checks what the devices *really* do: install firmware, report crashes, roll back, refuse forged commands. Anything they do not do is printed in red as **✘ NOT WORKING**, with what was seen instead, and the demo carries on; the summary lists every check. With the device update logic in place, a local run passes every check (91 with 10 devices). `--simulate` keeps the earlier behaviour: the demo fakes the device replies and the crash heartbeat (marked SIMULATED), for presenting before that work lands.
 
 **Watch it live.** The control plane includes the dashboard: open http://localhost:3000 (cloud: `http://<vm-ip>:3000`) next to the terminal to see the fleet, each rollout's health verdicts, the orchestrator's decisions, CPU and memory, and the messages that were rejected as the demo runs. Step 1 checks that it is up and can read the database.
 
@@ -31,10 +31,10 @@ The script exits with status 1 if any check is NOT WORKING, so CI runs it as the
 | 1 | Control plane started by one compose command, all services healthy | NF-6 |
 | 2 | Ten simulated devices (`--devices N` for 10 to 50) connect over MQTT and register with version 1.0 and a heartbeat | FR-1, FR-8 |
 | 3 | Three malformed heartbeats are rejected and logged with the reason | Message contract, NF-5 |
-| 4 | Faulty firmware 2.1 is rolled out to device-003: it must install it, report errors after ~10 s and `crash_count` after ~15 s while its heartbeats continue (a crash, not an offline device), then roll back to 1.0 | FR-3, FR-4, FR-8 |
+| 4 | Faulty firmware 2.1 is rolled out to the whole fleet in stages (3, 3, 4): only the canary group (device-001 to 003) gets it, reports errors and crashes, and the orchestrator halts and rolls the canaries back by itself within 60 s; the other devices never receive 2.1 | FR-2, FR-4, FR-5, FR-8 |
 | 5 | A stopped device is marked offline after the 30 s timeout, then back online on its next heartbeat | Timeout requirement, NF-1 |
 | 6 | The registry's signed firmware: the reference checks accept the genuine package and reject a flipped bit, a forged manifest, a different signing key and a replayed version. Then two forged update commands are published straight to device-002 (the broker has no authentication yet); it must refuse both and stay on 1.0 | FR-6, FR-3 |
-| 7 | Rollout of 2.0 to every device: each device's command is shown in full; each must report `update_succeeded` and then 2.0 in its heartbeats; the rollout must complete with every device updated | Orchestrator commands, FR-3, NF-5 |
+| 7 | Staged rollout of 2.0 (1, then 3, then 6 devices): each stage starts only after every device in the previous one is healthy; device-009 drops off and is judged 'not reached' without stopping the rollout; the rollout completes | FR-2, FR-3, FR-4, NF-1, NF-5 |
 | 8 | Rollback of that rollout: each device must report `rollback_succeeded` and 1.0 again; the rollout must end `rolled_back` | FR-5 path, NF-1, NF-5 |
 
 What the devices are expected to do comes from section 4 of `deploy/mqtt/mqtt-topics-and-messages.md` and from `firmware/README.md`. The demo checks it from the outside, over MQTT (a listener records every heartbeat, event and command), so the same checks run in local and cloud mode. The local demo starts its control plane with a 30 s command timeout, so a rollout whose devices never answer ends quickly instead of blocking the next step.

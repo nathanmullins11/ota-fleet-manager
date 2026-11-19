@@ -9,7 +9,7 @@
   "timezone": "browser",
   "refresh": "5s",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "time": {
     "from": "now-15m",
     "to": "now"
@@ -715,7 +715,7 @@
           "editorMode": "code",
           "rawQuery": true,
           "format": "table",
-          "rawSql": "SELECT '#' || r.id AS \"Rollout\", upper(r.state) AS \"State\", r.target_version AS \"Target\", r.rollback_version AS \"Rollback to\", round(100.0 * count(rd.device_id) FILTER ( WHERE rd.state IN ('commanded', 'updated', 'failed', 'rolled_back')) / NULLIF((SELECT count(*) FROM devices), 0)) AS \"Fleet exposed (%)\", count(rd.device_id) FILTER (WHERE rd.verdict = 'healthy') AS \"Healthy\", count(rd.device_id) FILTER (WHERE rd.verdict IN ('unhealthy', 'unresponsive', 'failed_update', 'no_reply')) AS \"Failed\" FROM rollouts r LEFT JOIN rollout_devices rd ON rd.rollout_id = r.id WHERE r.id = (CASE WHEN $rollout = 0 THEN (SELECT max(id) FROM rollouts) ELSE $rollout END) GROUP BY r.id"
+          "rawSql": "SELECT '#' || r.id AS \"Rollout\", upper(r.state) AS \"State\", r.target_version AS \"Target\", r.rollback_version AS \"Rollback to\", CASE WHEN r.stage_count > 1 THEN r.current_stage || ' of ' || r.stage_count ELSE 'single' END AS \"Stage\", round(100.0 * count(rd.device_id) FILTER ( WHERE rd.state IN ('commanded', 'updated', 'failed', 'rolled_back')) / NULLIF((SELECT count(*) FROM devices), 0)) AS \"Fleet exposed (%)\", count(rd.device_id) FILTER (WHERE rd.verdict = 'healthy') AS \"Healthy\", count(rd.device_id) FILTER (WHERE rd.verdict IN ('unhealthy', 'unresponsive', 'failed_update', 'no_reply')) AS \"Failed\" FROM rollouts r LEFT JOIN rollout_devices rd ON rd.rollout_id = r.id WHERE r.id = (CASE WHEN $rollout = 0 THEN (SELECT max(id) FROM rollouts) ELSE $rollout END) GROUP BY r.id"
         }
       ],
       "fieldConfig": {
@@ -801,7 +801,7 @@
         "type": "grafana-postgresql-datasource",
         "uid": "ota-postgres"
       },
-      "description": "Each device's progress and health verdict. 'watching' means it is in its health window.",
+      "description": "Each device's stage, progress and health verdict. 'watching': in its health window; 'waiting for its stage': its stage has not started yet.",
       "gridPos": {
         "h": 10,
         "w": 12,
@@ -818,7 +818,7 @@
           "editorMode": "code",
           "rawQuery": true,
           "format": "table",
-          "rawSql": "SELECT rd.device_id AS \"Device\", rd.state AS \"Rollout state\", coalesce(rd.verdict, CASE WHEN rd.state = 'updated' THEN 'watching' END) AS \"Health\", rd.verdict_reason AS \"Why\", d.current_version AS \"Reports\" FROM rollout_devices rd JOIN devices d ON d.device_id = rd.device_id WHERE rd.rollout_id = (CASE WHEN $rollout = 0 THEN (SELECT max(id) FROM rollouts) ELSE $rollout END) ORDER BY rd.device_id"
+          "rawSql": "SELECT rd.stage AS \"Stage\", rd.device_id AS \"Device\", rd.state AS \"Rollout state\", coalesce(rd.verdict, CASE WHEN rd.state = 'updated' THEN 'watching' WHEN rd.state = 'pending' THEN 'waiting for its stage' END) AS \"Health\", rd.verdict_reason AS \"Why\", d.current_version AS \"Reports\" FROM rollout_devices rd JOIN devices d ON d.device_id = rd.device_id WHERE rd.rollout_id = (CASE WHEN $rollout = 0 THEN (SELECT max(id) FROM rollouts) ELSE $rollout END) ORDER BY rd.stage, rd.device_id"
         }
       ],
       "fieldConfig": {
@@ -883,6 +883,11 @@
                         "color": "#8e8e8e",
                         "index": 6,
                         "text": "not_reached"
+                      },
+                      "waiting for its stage": {
+                        "color": "#8e8e8e",
+                        "index": 7,
+                        "text": "waiting for its stage"
                       }
                     }
                   }
@@ -935,6 +940,18 @@
               {
                 "id": "custom.width",
                 "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Stage"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 60
               }
             ]
           }
@@ -1108,7 +1125,7 @@
           "editorMode": "code",
           "rawQuery": true,
           "format": "table",
-          "rawSql": "SELECT r.id AS \"Rollout\", r.target_version AS \"Target\", r.rollback_version AS \"Rollback to\", r.state AS \"State\", r.started_at AS \"Started\", round(EXTRACT(EPOCH FROM (coalesce(r.ended_at, now()) - r.started_at))) AS \"Duration (s)\", round(EXTRACT(EPOCH FROM (min(e.created_at) FILTER (WHERE e.event = 'halted') - r.started_at))) AS \"Time to halt (s)\", round(EXTRACT(EPOCH FROM (min(e.created_at) FILTER (WHERE e.event = 'rollback_completed') - min(e.created_at) FILTER (WHERE e.event = 'halted')))) AS \"Time to roll back (s)\", r.halt_reason AS \"Halt reason\" FROM rollouts r LEFT JOIN rollout_events e ON e.rollout_id = r.id GROUP BY r.id ORDER BY r.id DESC LIMIT 20"
+          "rawSql": "SELECT r.id AS \"Rollout\", r.target_version AS \"Target\", r.rollback_version AS \"Rollback to\", r.state AS \"State\", coalesce(r.stage_plan, 'single') AS \"Stages\", r.started_at AS \"Started\", round(EXTRACT(EPOCH FROM (coalesce(r.ended_at, now()) - r.started_at))) AS \"Duration (s)\", round(EXTRACT(EPOCH FROM (min(e.created_at) FILTER (WHERE e.event = 'halted') - r.started_at))) AS \"Time to halt (s)\", round(EXTRACT(EPOCH FROM (min(e.created_at) FILTER (WHERE e.event = 'rollback_completed') - min(e.created_at) FILTER (WHERE e.event = 'halted')))) AS \"Time to roll back (s)\", r.halt_reason AS \"Halt reason\" FROM rollouts r LEFT JOIN rollout_events e ON e.rollout_id = r.id GROUP BY r.id ORDER BY r.id DESC LIMIT 20"
         }
       ],
       "fieldConfig": {

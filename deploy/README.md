@@ -137,7 +137,7 @@ How it is set up:
 - **Control-plane resource use** comes from the `stats-collector` service, which reads container stats from the Docker socket every 5 seconds and writes them to `control_plane_stats` (kept 24 hours). The socket is mounted read-only and the collector only lists containers and reads their stats, but access to it is powerful: keep it in mind if you change that service.
 - `tests/component/test_dashboard.py` runs every dashboard query as the read-only login against a real database, so a schema change that breaks a panel fails CI.
 
-## Run a rollout (update, health check, automatic rollback)
+## Run a rollout (stages, health check, automatic rollback)
 
 Rollouts are started from the CLI inside the orchestrator container. The CLI only records the request in the database; the running orchestrator sends the commands within about a second, follows the devices' events, and logs every decision with its reason (`docker compose logs -f orchestrator`).
 
@@ -146,6 +146,7 @@ docker compose exec orchestrator python cli.py versions                  # firmw
 docker compose exec orchestrator python cli.py devices                   # fleet, with previous versions
 docker compose exec orchestrator python cli.py rollout start 2.0 --all   # or --devices device-001,device-002
 docker compose exec orchestrator python cli.py rollout start 2.1 --all --max-errors 50 --health-window 30
+docker compose exec orchestrator python cli.py rollout start 2.0 --all --stages 1,3,6     # staged
 docker compose exec orchestrator python cli.py rollout status --watch    # latest rollout, live
 docker compose exec orchestrator python cli.py rollout rollback 1        # send rollout 1's devices back
 docker compose exec orchestrator python cli.py rollout list
@@ -158,6 +159,14 @@ docker compose exec orchestrator python cli.py rollout list
 - The rollback version defaults to the version the commanded devices run now; if they run different versions, give it with `--rollback-to`.
 - A device that does not answer a command within `COMMAND_TIMEOUT_SECONDS` (default 120) is marked `failed`, so a rollout always finishes. If it kept sending heartbeats it is `no_reply` (an agent problem, counted as a failed update); if it went silent it is `not_reached` (offline, never a reason to roll back).
 - `rollback` works on `in_progress` and `completed` rollouts and sends every device in the rollout back to its rollback version. You can still roll back by hand; the health rules below do it automatically.
+
+**Staged rollout (FR-2).** `--stages` splits a rollout into stages, devices in device-ID order:
+
+- Plain numbers are stage sizes: `--stages 1,3,6` updates device-001 first, then the next three, then the rest. Devices left over join the last stage.
+- Percentages are the share of the devices reached by the end of each stage: `--stages 10%,50%,100%` (the last must be 100%).
+- Only the current stage's devices are commanded. The next stage starts when every device in the current one has been judged healthy (or failed within the limits), recorded as a `stage_advanced` decision with its reason. A device already offline when its stage starts is marked `not_reached` and not commanded.
+- If a stage crosses a health limit, the rollout halts and only the devices commanded so far are rolled back; devices in later stages are `skipped` and never receive the update.
+- Without `--stages`, a rollout is a single stage, as before.
 
 **Health evaluation and automatic rollback (FR-4, FR-5).** After a device reports `update_succeeded`, the orchestrator watches it for a health window and gives it a verdict, shown in `rollout status` and recorded in the decision log:
 

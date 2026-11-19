@@ -25,7 +25,14 @@ failed installs than allowed, halts the rollout and rolls it back automatically:
 
 Only unhealthy, unresponsive, and failed_update or no_reply beyond the allowed number,
 trigger a rollback. A device that is merely offline (not_reached) never does.
+
+Staged rollout (FR-2): a rollout can run in stages (`--stages 1,3,6` or `10%,50%,100%`),
+devices assigned in device-ID order. Only the current stage's devices are commanded; the
+next stage starts once every device in the current one has finished (judged healthy, or
+failed within the rollout's limits). A halt rolls back only the devices commanded so far;
+devices in later stages are 'skipped' and never receive the update.
 """
+import math
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -149,6 +156,81 @@ def health_decision(verdicts: dict, limits: HealthLimits) -> Optional[str]:
         return (f"automatic: {len(failed)} device(s) failed to update "
                 f"(limit {limits.max_failed_devices}): {details}")
     return None
+
+
+def stage_sizes(spec: Optional[str], device_count: int) -> list[int]:
+    """Stage sizes for a rollout of device_count devices.
+
+    No spec: one stage. Plain numbers are stage sizes ("1,3,6"); devices left over join the
+    last stage, and stages that would be empty are dropped. Percentages are the share of the
+    devices reached by the end of each stage ("10%,50%,100%"); the last must be 100%.
+    """
+    if device_count < 1:
+        raise RolloutError("a rollout needs at least one device")
+    if not spec or not spec.strip():
+        return [device_count]
+    parts = [p.strip() for p in spec.split(",")]
+    if any(not p for p in parts):
+        raise RolloutError(f"stages {spec!r}: empty stage")
+    percent = [p.endswith("%") for p in parts]
+    try:
+        if all(percent):
+            shares = [int(p[:-1]) for p in parts]
+            if any(not 0 < x <= 100 for x in shares) or any(
+                    b <= a for a, b in zip(shares, shares[1:], strict=False)):
+                raise ValueError
+            if shares[-1] != 100:
+                raise RolloutError(f"stages {spec!r}: the last stage must reach 100%")
+            reached = [max(1, math.ceil(device_count * x / 100)) for x in shares]
+            sizes = [b - a for a, b in zip([0] + reached[:-1], reached, strict=True)]
+        elif not any(percent):
+            counts = [int(p) for p in parts]
+            if any(c < 1 for c in counts):
+                raise ValueError
+            sizes, left = [], device_count
+            for c in counts:
+                if left == 0:
+                    break
+                sizes.append(min(c, left))
+                left -= sizes[-1]
+            sizes[-1] += left
+        else:
+            raise RolloutError(f"stages {spec!r}: use either counts (1,3,6) or percentages "
+                               "(10%,50%,100%), not both")
+    except ValueError:
+        raise RolloutError(f"stages {spec!r}: counts must be whole numbers of 1 or more, "
+                           "percentages must rise from 1% to 100%") from None
+    return [n for n in sizes if n > 0]
+
+
+def assign_stages(device_ids: list, sizes: list) -> dict:
+    """device_id -> stage (1-based), filling stages in device-ID order."""
+    ordered = sorted(device_ids)
+    if sum(sizes) != len(ordered):
+        raise ValueError("stage sizes do not add up to the number of devices")
+    stages, i = {}, 0
+    for stage, size in enumerate(sizes, start=1):
+        for device_id in ordered[i:i + size]:
+            stages[device_id] = stage
+        i += size
+    return stages
+
+
+def describe_stages(stages: dict) -> str:
+    """'stage 1: device-001; stage 2: device-002, device-003; ...' for the decision log."""
+    by_stage = {}
+    for device_id, stage in sorted(stages.items()):
+        by_stage.setdefault(stage, []).append(device_id)
+    return "; ".join(f"stage {n}: {', '.join(ids)}" for n, ids in sorted(by_stage.items()))
+
+
+def stage_finished(devices: list) -> bool:
+    """Whether a stage may hand over to the next. devices: (state, verdict) for each device in
+    the stage. Finished means every device was judged healthy or failed (within the limits;
+    a breach halts the rollout before this is asked)."""
+    return bool(devices) and all(
+        state == "failed" or (state == "updated" and verdict == "healthy")
+        for state, verdict in devices)
 
 
 def utc_now() -> str:
@@ -282,9 +364,12 @@ def outcome(rollout_state: str, device_states: dict,
                 reason += f"; not reached (offline): {', '.join(not_reached)}"
         return "completed", "completed", reason
     if rollout_state == "halted":
+        skipped = sum(s == "skipped" for s in device_states.values())
         restored = sum(s == "rolled_back" for s in device_states.values())
-        reason = f"{restored} of {total} devices rolled back"
+        reason = f"{restored} of {total - skipped} devices rolled back"
         if failed:
             reason += f"; failed: {', '.join(failed)}"
+        if skipped:
+            reason += f"; {skipped} in later stages never received the update"
         return "rolled_back", "rollback_completed", reason
     return None

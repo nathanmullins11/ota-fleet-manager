@@ -57,7 +57,7 @@ cleanup() {
     if [[ "$KEEP" == 1 ]]; then
         info "Left running (--keep). To remove everything later:"
         info "  docker rm -f \$(docker ps -aq --filter label=$DEMO_LABEL)"
-        info "  docker compose -p $CP_PROJECT -f deploy/docker-compose.yml down -v"
+        info "  POSTGRES_PASSWORD=unused docker compose -p $CP_PROJECT -f deploy/docker-compose.yml down -v"
         return
     fi
     info "Cleaning up: removing demo devices and the demo control plane..."
@@ -71,9 +71,18 @@ check_no_other_devices
 for port in 1883 3000 5432 8080; do
     if port_open 127.0.0.1 "$port"; then
         die "Port $port is already in use on this machine, so the demo control plane cannot start.
-  If your own control plane is running, stop it first:  (cd deploy && docker compose down)"
+  If your own control plane is running, stop it first:  (cd deploy && docker compose down)
+  If an earlier demo run with --keep is still running, remove it first:
+    docker rm -f \$(docker ps -aq --filter label=$DEMO_LABEL)
+    POSTGRES_PASSWORD=unused docker compose -p $CP_PROJECT -f deploy/docker-compose.yml down -v"
     fi
 done
+
+# The ports are free, so anything left of an earlier demo run is stopped: remove it, including
+# its database volume, so this run really starts with a fresh database (a leftover volume keeps
+# the old run's random password and the orchestrator could not log in).
+remove_devices
+cp_compose down -v --remove-orphans >/dev/null 2>&1
 
 trap cleanup EXIT
 trap 'exit 130' INT

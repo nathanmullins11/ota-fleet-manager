@@ -79,7 +79,9 @@ CREATE TABLE rollouts (
     rollback_version TEXT NOT NULL REFERENCES firmware_versions(version),  -- last stable
     state            TEXT NOT NULL DEFAULT 'pending'
         CHECK (state IN ('pending', 'in_progress', 'completed', 'halted', 'rolled_back')),
-    current_stage    INTEGER NOT NULL DEFAULT 0,
+    current_stage    INTEGER NOT NULL DEFAULT 0,        -- stage being rolled out (1 = first)
+    stage_count      INTEGER NOT NULL DEFAULT 1,        -- number of stages in the plan
+    stage_plan       TEXT,                              -- as given, e.g. '1,3,6' or '10%,50%,100%'
     halt_reason      TEXT,
     started_at       TIMESTAMPTZ,
     ended_at         TIMESTAMPTZ,
@@ -96,7 +98,9 @@ CREATE TABLE rollout_devices (
     rollout_id  BIGINT NOT NULL REFERENCES rollouts(id) ON DELETE CASCADE,
     device_id   TEXT   NOT NULL REFERENCES devices(device_id) ON DELETE CASCADE,
     state       TEXT   NOT NULL DEFAULT 'pending'
-        CHECK (state IN ('pending', 'commanded', 'updated', 'failed', 'rolled_back')),
+        CONSTRAINT rollout_devices_state_check
+        CHECK (state IN ('pending', 'commanded', 'updated', 'failed', 'rolled_back', 'skipped')),
+    stage       INTEGER NOT NULL DEFAULT 1,             -- the stage this device is updated in
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     window_started_at TIMESTAMPTZ,      -- update_succeeded arrived: health window starts
     verdict     TEXT                    -- health evaluation result (rollout_logic.py)
