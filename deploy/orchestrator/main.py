@@ -77,6 +77,11 @@ def handle_message(msg, db: Database, on_event=None) -> None:
             log.warning("Ignoring unknown topic kind %r from %s", kind, device_id)
     except InvalidMessage as exc:
         log.warning("Rejected %s message from %s: %s", kind, device_id, exc)
+        try:
+            db.record_rejected(device_id, msg.topic, "invalid_message", f"{kind}: {exc}",
+                               msg.payload)
+        except Exception:
+            log.exception("Could not record the rejected message")
 
 
 def sync_firmware(cfg, store: RolloutStore) -> bool:
@@ -137,11 +142,22 @@ def main() -> None:
     client.loop_start()
 
     firmware_synced = False
-    next_sync = next_check = time.monotonic()
+    reader_ready = not cfg.dashboard_db_password     # nothing to do without a password
+    if reader_ready:
+        log.info("GRAFANA_DB_PASSWORD is not set: no dashboard login is created")
+    next_sync = next_check = next_reader = time.monotonic()
     while not stop.is_set():
         if not firmware_synced and time.monotonic() >= next_sync:
             firmware_synced = sync_firmware(cfg, store)
             next_sync = time.monotonic() + 10
+        if not reader_ready and time.monotonic() >= next_reader:
+            try:
+                main_db.ensure_dashboard_reader(cfg.dashboard_db_user, cfg.dashboard_db_password)
+                log.info("Dashboard login %s is ready (read-only)", cfg.dashboard_db_user)
+                reader_ready = True
+            except Exception:
+                log.exception("Could not set up the dashboard login; retrying in 30 s")
+                next_reader = time.monotonic() + 30
         try:
             runner.tick()
         except Exception:

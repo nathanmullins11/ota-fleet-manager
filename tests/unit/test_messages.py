@@ -172,3 +172,31 @@ def test_event_rollout_id_in_bigint_range(messages, rollout_id):
 def test_event_rollout_id_out_of_range_rejected(messages, rollout_id):
     with pytest.raises(messages.InvalidMessage, match="rollout_id must be an integer"):
         messages.parse_event(DEVICE, event(rollout_id=rollout_id))
+
+
+# --------------------------------------------------------------------------- resource fields
+# cpu_percent and memory_mb: optional numbers, for the dashboard and scale tests.
+
+def test_resource_fields_are_optional(messages):
+    hb = messages.parse_heartbeat(DEVICE, heartbeat())
+    assert (hb.cpu_percent, hb.memory_mb) == (None, None)
+
+
+@pytest.mark.parametrize("cpu,mem", [(0, 0), (1.25, 24.3), (250, 512)])
+def test_resource_fields_accepted(messages, cpu, mem):
+    hb = messages.parse_heartbeat(DEVICE, heartbeat(cpu_percent=cpu, memory_mb=mem))
+    assert (hb.cpu_percent, hb.memory_mb) == (float(cpu), float(mem))
+
+
+@pytest.mark.parametrize("key,value", [("cpu_percent", -1), ("cpu_percent", "5"),
+                                       ("cpu_percent", True), ("memory_mb", 2_000_000),
+                                       ("memory_mb", [1])])
+def test_bad_resource_fields_rejected(messages, key, value):
+    with pytest.raises(messages.InvalidMessage, match=key):
+        messages.parse_heartbeat(DEVICE, heartbeat(**{key: value}))
+
+
+def test_null_resource_field_rejected(messages):
+    payload = heartbeat().replace(b'"crash_count": 0', b'"crash_count": 0, "memory_mb": null')
+    with pytest.raises(messages.InvalidMessage, match="memory_mb"):
+        messages.parse_heartbeat(DEVICE, payload)

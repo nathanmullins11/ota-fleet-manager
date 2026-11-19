@@ -28,6 +28,13 @@ if [[ "$CP_LOCAL" == 1 ]]; then
     else
         check_fail "Expected 3 rejections, saw $count."
     fi
+    recorded=$(cp_psql -Atc "SELECT count(*) FROM rejected_messages
+                              WHERE kind = 'invalid_message' AND device_id = 'device-002';")
+    if ((recorded >= 3)); then
+        check_pass "All $recorded recorded for the dashboard's Security panel (rejected_messages)"
+    else
+        check_fail "only ${recorded:-0} of the rejections were recorded in rejected_messages"
+    fi
 else
     look_at_vm "three 'Rejected heartbeat message from device-002: ...' lines in the orchestrator log."
 fi

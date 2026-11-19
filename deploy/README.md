@@ -9,7 +9,7 @@ This folder holds the Docker Compose setup for the OTA Fleet Manager control pla
 | `software-registry` | Serves versioned firmware packages (FastAPI) | 8080 |
 | `orchestrator` | Listens for device heartbeats over MQTT and records them in `postgres` | none |
 
-Grafana is added to the same Compose file in a later task. The broker accepts anonymous, unencrypted connections for now; TLS and per-device credentials arrive in Iteration 3. Until then, limit port 1883 on the cloud VM to known IP addresses.
+Grafana (the dashboard) runs in the same Compose file, on port 3000. The broker accepts anonymous, unencrypted connections for now; TLS and per-device credentials arrive in Iteration 3. Until then, limit port 1883 on the cloud VM to known IP addresses.
 
 ## Prerequisites
 
@@ -114,6 +114,28 @@ Expected: `device-001` appears with its version and a recent heartbeat. Stop pub
 To test with a simulated device, see `device-agent/README.md`.
 
 Settings are environment variables (see `orchestrator/config.py` and `.env.example`): `MQTT_HOST`, `DB_HOST`, `HEARTBEAT_TIMEOUT_SECONDS`, `REGISTRY_PUBLIC_URL`, `COMMAND_TIMEOUT_SECONDS`, `LOG_LEVEL`, and others.
+
+## Dashboard
+
+Open **http://localhost:3000** (on the cloud VM: `http://<elastic-ip>:3000`, with port 3000 open to your IP). It is live (refreshes every 5 seconds) and view-only: anyone who can reach the port can watch, and no login is needed. Rollouts are still started and rolled back from the CLI below or the cloud live view.
+
+| Section | Shows |
+|---|---|
+| Fleet now | Devices, healthy, unhealthy, offline; every device's version, status, errors, crashes and last heartbeat; devices per firmware version |
+| Health over time | Firmware errors and crashes per device, and how many devices are reporting |
+| Rollout | The selected rollout (default: the latest): state, versions, how much of the fleet it reached, each device's health verdict and reason, and the decision log |
+| Rollout history | Recent rollouts with their duration, time to halt and time to roll back |
+| Resources | CPU and memory of every device (from its heartbeats) and of every control-plane service (from the stats collector), now and over time |
+| Security | Messages the orchestrator rejected, and forged commands devices refused, with the device and reason |
+
+How it is set up:
+
+- Everything comes from files in `grafana/`: the data source (`provisioning/datasources/postgres.yml`) and the dashboard (`dashboards/fleet.json`). Change the JSON, not the Grafana UI: changes made in the UI are not saved.
+- Grafana reads the database through a **read-only login** (`dashboard_reader`) that the orchestrator creates or updates every time it starts. It can read every table and view, including ones added by later migrations, and change nothing.
+- Settings in `.env`: `GRAFANA_ADMIN_PASSWORD` (the `admin` login, needed only to edit) and `GRAFANA_DB_PASSWORD` (the read-only login). `demo/cloud/control-plane.sh` generates both on the VM.
+- **Device resource use** comes from the devices themselves (optional `cpu_percent` and `memory_mb` in each heartbeat), so it works when the devices run on another machine.
+- **Control-plane resource use** comes from the `stats-collector` service, which reads container stats from the Docker socket every 5 seconds and writes them to `control_plane_stats` (kept 24 hours). The socket is mounted read-only and the collector only lists containers and reads their stats, but access to it is powerful: keep it in mind if you change that service.
+- `tests/component/test_dashboard.py` runs every dashboard query as the read-only login against a real database, so a schema change that breaks a panel fails CI.
 
 ## Run a rollout (update, health check, automatic rollback)
 

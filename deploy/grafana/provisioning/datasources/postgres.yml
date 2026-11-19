@@ -1,0 +1,21 @@
+# The fleet database, through the read-only login the orchestrator creates
+# (db.Database.ensure_dashboard_reader). Values come from the grafana service's environment.
+apiVersion: 1
+
+datasources:
+  - name: Fleet database
+    uid: ota-postgres
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: ${GRAFANA_DB_HOST}
+    user: ${GRAFANA_DB_USER}
+    isDefault: true
+    editable: false
+    jsonData:
+      database: ${GRAFANA_DB_NAME}
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+      maxOpenConns: 5
+    secureJsonData:
+      password: ${GRAFANA_DB_PASSWORD}

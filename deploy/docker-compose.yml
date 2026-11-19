@@ -1,7 +1,7 @@
 # Control plane services for the OTA Fleet Manager.
 # Start with:  cp .env.example .env   (then edit the password)
 #              docker compose up -d --build
-# More services (Grafana) are added in later tasks.
+# Dashboard (Grafana): http://localhost:3000, or http://<vm-ip>:3000 on the cloud VM.
 
 name: ota-fleet-manager
 
@@ -88,6 +88,8 @@ services:
       HEALTH_MAX_ERRORS: ${HEALTH_MAX_ERRORS:-10}
       HEALTH_MAX_FAILED_DEVICES: ${HEALTH_MAX_FAILED_DEVICES:-0}
       HEALTH_UNRESPONSIVE_SECONDS: ${HEALTH_UNRESPONSIVE_SECONDS:-45}
+      # The orchestrator creates the dashboard's read-only database login with this password.
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-dashboard-read-only}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       mosquitto:
@@ -97,5 +99,64 @@ services:
       software-registry:
         condition: service_healthy
 
+  # CPU and memory of the control-plane containers, for the dashboard. Reads container
+  # stats from the Docker socket (mounted read-only) and writes them to control_plane_stats.
+  # Access to the Docker socket is powerful: this service only lists and reads stats.
+  stats-collector:
+    build: ./stats-collector
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      DB_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-ota}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-ota}
+      STATS_INTERVAL_SECONDS: ${STATS_INTERVAL_SECONDS:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Live, view-only operations dashboard (FR-9). Configured entirely from deploy/grafana/:
+  # the data source (the read-only login above) and the dashboard itself.
+  grafana:
+    image: grafana/grafana-oss:11.6.0
+    restart: unless-stopped
+    logging: *logging
+    ports:
+      - "3000:3000"
+    environment:
+      GRAFANA_DB_HOST: postgres:5432
+      GRAFANA_DB_NAME: ${POSTGRES_DB:-ota}
+      GRAFANA_DB_USER: dashboard_reader
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-dashboard-read-only}
+      # Anyone who can reach the port sees the dashboard read-only; editing needs the admin login.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/fleet.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      postgres:
+        condition: service_healthy
+      orchestrator:
+        condition: service_started   # it creates the dashboard's database login
+
 volumes:
   pgdata:
+  grafana-data:

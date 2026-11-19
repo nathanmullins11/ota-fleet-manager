@@ -27,6 +27,7 @@ from config import Config, load_config
 from firmware_runner import FirmwareRunner
 from installer import (InstallError, Installed, Store, VerificationError, download_verified,
                        load_public_key)
+from resources import ResourceSampler
 
 log = logging.getLogger("device-agent")
 
@@ -49,7 +50,7 @@ def utc_now() -> str:
 
 
 def build_heartbeat(device_id: str, version: str, status: str, error_count: int,
-                    crash_count: int) -> dict:
+                    crash_count: int, resources: Optional[dict] = None) -> dict:
     return {
         "schema_version": 1,
         "device_id": device_id,
@@ -57,6 +58,7 @@ def build_heartbeat(device_id: str, version: str, status: str, error_count: int,
         "status": status,               # healthy, degraded, unhealthy or updating
         "error_count": error_count,     # errors since the previous heartbeat
         "crash_count": crash_count,     # firmware crashes since the previous heartbeat
+        **(resources or {}),            # optional cpu_percent, memory_mb (resources.py)
         "timestamp": utc_now(),
     }
 
@@ -80,11 +82,13 @@ EventSink = Callable[[str, int, str, Optional[str]], None]   # (event, rollout_i
 class Device:
     """The device's update logic, independent of MQTT (tests drive it directly)."""
 
-    def __init__(self, cfg: Config, store: Store, runner: FirmwareRunner, send_event: EventSink):
+    def __init__(self, cfg: Config, store: Store, runner: FirmwareRunner, send_event: EventSink,
+                 resources: Optional[ResourceSampler] = None):
         self.cfg = cfg
         self.store = store
         self.runner = runner
         self.send_event = send_event
+        self.resources = resources
         self.busy = threading.Event()
 
     @property
@@ -103,7 +107,8 @@ class Device:
         health = self.runner.take_health()
         status = "updating" if self.busy.is_set() else health.status
         return build_heartbeat(self.cfg.device_id, self.version, status,
-                               health.errors, health.crashes)
+                               health.errors, health.crashes,
+                               self.resources.sample() if self.resources else None)
 
     def handle(self, cmd: Command) -> None:
         kind, version = cmd.command, cmd.target_version
@@ -270,7 +275,7 @@ def main() -> None:
                  cmd.rollout_id, "; queued behind the current one" if device.busy.is_set() else "")
         commands.put(cmd)
 
-    device = Device(cfg, store, runner, send_event)
+    device = Device(cfg, store, runner, send_event, ResourceSampler())
     try:
         device.boot()
     except (InstallError, VerificationError, OSError) as exc:

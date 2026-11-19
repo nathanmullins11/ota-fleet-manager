@@ -5,6 +5,7 @@ source_dirs =
     deploy/orchestrator
     deploy/device-agent
     deploy/registries/software
+    deploy/stats-collector
     tools
 
 [report]
