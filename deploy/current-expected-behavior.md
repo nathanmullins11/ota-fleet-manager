@@ -37,7 +37,7 @@ The orchestrator starts only after `mosquitto` and `postgres` are healthy.
 
 ```
 Starting orchestrator (heartbeat timeout 30s)
-Connected to broker mosquitto:1883
+Connected to broker mosquitto:8883 (TLS, signed in as orchestrator)
 Connected to database ota at postgres:5432
 ```
 
@@ -52,7 +52,7 @@ Then the logs go quiet. The offline check runs every 5 seconds, but it only logs
 | Log message | Likely cause |
 |---|---|
 | `Cannot reach broker ... retrying` | The broker is not running, or the host name is not `mosquitto` |
-| `Broker refused the connection` | The broker config does not allow this client (no listener on 1883, or anonymous connections not allowed) |
+| `Broker refused the connection` | The broker config does not allow this client (wrong `MQTT_ORCHESTRATOR_PASSWORD`, or the password file was made from a different `.env`: rerun `tools/mqtt_security.py setup`) |
 
 **Optional check without a device:** publish a test heartbeat by hand (the command is in the README, under "Orchestrator"). The device should appear in `fleet_overview`.
 
@@ -63,7 +63,7 @@ Assumes the device agent publishes valid heartbeats about every 5 seconds.
 **Orchestrator logs (default `INFO` level)**
 
 ```
-Connected to broker mosquitto:1883
+Connected to broker mosquitto:8883 (TLS, signed in as orchestrator)
 Connected to database ota at postgres:5432
 Connected to database ota at postgres:5432      <- second line, on the first heartbeat
 ```

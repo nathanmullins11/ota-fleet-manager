@@ -26,12 +26,18 @@ log = logging.getLogger("orchestrator")
 def build_client(cfg, mqtt_db: Database, on_event) -> mqtt.Client:
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=cfg.mqtt_client_id)
     client.reconnect_delay_set(min_delay=1, max_delay=30)
+    if cfg.mqtt_username:
+        client.username_pw_set(cfg.mqtt_username, cfg.mqtt_password)
+    if cfg.mqtt_ca_cert:
+        # TLS, verifying the broker's certificate (and its host name) against our CA.
+        client.tls_set(ca_certs=cfg.mqtt_ca_cert)
 
     def on_connect(client, userdata, flags, reason_code, properties):
         if reason_code.is_failure:
             log.error("Broker refused the connection: %s", reason_code)
             return
-        log.info("Connected to broker %s:%s", cfg.mqtt_host, cfg.mqtt_port)
+        log.info("Connected to broker %s:%s (%s, signed in as %s)", cfg.mqtt_host, cfg.mqtt_port,
+                 "TLS" if cfg.mqtt_ca_cert else "plain text", cfg.mqtt_username or "anonymous")
         # Subscribe here so subscriptions are restored after any reconnect.
         client.subscribe(HEARTBEAT_SUBSCRIPTION, qos=0)
         client.subscribe(EVENTS_SUBSCRIPTION, qos=1)

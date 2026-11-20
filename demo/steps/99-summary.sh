@@ -7,6 +7,7 @@ printf '   %-50s %s\n' \
     "Control plane from one compose command" "NF-6" \
     "Devices register with version + heartbeat" "FR-1, FR-8" \
     "Malformed messages rejected and logged" "contract, NF-5" \
+    "Broker: TLS only, sign-in, per-device topics" "FR-7, NF-3" \
     "Faulty firmware crashes, reported (not offline)" "FR-3, FR-4, FR-8" \
     "Offline after 30 s silence, back online" "timeout req., NF-1" \
     "Signed firmware; tampering rejected" "FR-6, FR-3" \

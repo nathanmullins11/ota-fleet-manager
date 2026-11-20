@@ -10,7 +10,10 @@
 #   demo/cloud/devices.sh <vm-ip> --devices N # number of simulated devices, 10 to 50 (default 10)
 #   demo/cloud/devices.sh <vm-ip> --detail    # full evidence: device logs, processes, raw messages
 #
-# The VM's security group must allow TCP 1883 (MQTT) from your IP, and TCP 8080
+# Needs the broker's CA certificate and the device secret from the VM, in demo/cloud/:
+#   scp ubuntu@<vm-ip>:ota-fleet-manager/deploy/mqtt/generated/{ca.crt,device.env} demo/cloud/
+# (control-plane.sh prints this command). The VM's security group must allow TCP 8883
+# (MQTT over TLS) from your IP, and TCP 8080
 # (software registry) for the signed-firmware step.
 set -uo pipefail
 
@@ -24,7 +27,7 @@ while (($#)); do
         --keep) KEEP=1 ;;
         --simulate) export SIMULATE=1 ;;
         --detail) export DETAIL=1 ;;
-        -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
         *) VM_HOST=$arg ;;
     esac
@@ -42,6 +45,19 @@ fi
 export CP_LOCAL=0
 export MQTT_HOST=$VM_HOST
 export REGISTRY_URL=http://$VM_HOST:8080
+
+# Broker trust and sign-in, copied from the VM (see the header).
+CLOUD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export CA_CERT="$CLOUD_DIR/ca.crt"
+if [[ ! -f "$CA_CERT" || ! -f "$CLOUD_DIR/device.env" ]]; then
+    echo "Missing demo/cloud/ca.crt or demo/cloud/device.env. Copy them from the VM:" >&2
+    echo "  scp ubuntu@$VM_HOST:ota-fleet-manager/deploy/mqtt/generated/{ca.crt,device.env} demo/cloud/" >&2
+    exit 2
+fi
+set -a
+# shellcheck source=/dev/null
+source "$CLOUD_DIR/device.env"
+set +a
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
@@ -64,12 +80,12 @@ banner "OTA Update Fleet Manager — cloud demo" \
        "Control plane on the VM ($VM_HOST), $DEVICE_COUNT simulated devices on this machine"
 
 say "Checking the VM is reachable from here:"
-if port_open "$VM_HOST" 1883; then
-    ok "MQTT broker   $VM_HOST:1883"
+if port_open "$VM_HOST" 8883; then
+    ok "MQTT broker   $VM_HOST:8883 (TLS)"
 else
-    bad "MQTT broker   $VM_HOST:1883 is not reachable."
-    die "Check that control-plane.sh is running on the VM and the security group allows TCP 1883
-  from your IP (find it with: curl -4 ifconfig.me). Some campus/work networks block 1883."
+    bad "MQTT broker   $VM_HOST:8883 is not reachable."
+    die "Check that control-plane.sh is running on the VM and the security group allows TCP 8883
+  from your IP (find it with: curl -4 ifconfig.me). Some campus/work networks block MQTT ports."
 fi
 if port_open "$VM_HOST" 8080; then
     ok "Registry      $VM_HOST:8080"

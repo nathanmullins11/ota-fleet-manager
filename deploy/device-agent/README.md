@@ -7,7 +7,7 @@ The message format is defined in `../../docs/mqtt-topics-and-messages.md`.
 ## Run
 
 ```bash
-cp .env.example .env          # set MQTT_HOST (see the file for options)
+cp .env.example .env          # set MQTT_HOST and DEVICE_001_PASSWORD (see the file)
 docker compose up -d --build
 docker compose logs -f --tail 50 device-001
 ```
@@ -19,7 +19,7 @@ Installing factory firmware 1.0
 Firmware 1.0 started (pid 8)
 firmware: firmware 1.0 started
 Starting device-001 (firmware 1.0, heartbeat every 5.0s)
-Connected to broker host.docker.internal:1883 as device-001
+Connected to broker host.docker.internal:8883 as device-001 (TLS)
 Publishing heartbeats to ota/devices/device-001/heartbeat
 ```
 
@@ -39,7 +39,10 @@ docker compose exec postgres psql -U ota -d ota -c "SELECT * FROM fleet_overview
 |---|---|---|
 | `DEVICE_ID` | (required) | Like `device-001`. Also the MQTT client ID, so it must be unique per device |
 | `MQTT_HOST` | `localhost` (`host.docker.internal` in the Compose file) | Broker address |
-| `MQTT_PORT` | `1883` | Broker port |
+| `MQTT_PORT` | `1883` (`8883` in the Compose file and `fleet.sh`) | Broker port |
+| `MQTT_USERNAME` | the device ID | Broker account |
+| `MQTT_PASSWORD` | (none) | This device's broker password, derived from `DEVICE_SECRET` and the device ID by the launcher (`tools/mqtt_security.py device-password`) |
+| `MQTT_CA_CERT` | (none: plain MQTT) | CA certificate to verify the broker with; set, the agent connects over TLS. The control plane's `deploy/mqtt/generated/ca.crt` |
 | `HEARTBEAT_INTERVAL_SECONDS` | `5` | Time between heartbeats |
 | `LOG_LEVEL` | `INFO` | Use `DEBUG` to log every heartbeat sent |
 | `FIRMWARE_START_TIMEOUT_SECONDS` | `5` | New firmware must report a healthy status within this time, or the update fails and the old version is restarted |
@@ -47,7 +50,7 @@ docker compose exec postgres psql -U ota -d ota -c "SELECT * FROM fleet_overview
 | `DOWNLOAD_TIMEOUT_SECONDS` | `15` | Per file, when downloading a package |
 | `FIRMWARE_DIR` | `~/firmware` | Installed versions and `state.json` |
 
-The firmware's own settings (`FIRMWARE_TICK_SECONDS`, `FIRMWARE_FAULT_*`, see `firmware/README.md`) are passed through to it. The version a device runs is no longer a setting: it is whatever is installed, starting with the factory firmware 1.0.
+The firmware's own settings (`FIRMWARE_TICK_SECONDS`, `FIRMWARE_FAULT_*`, see `firmware/README.md`) are passed through to it. The broker settings (`MQTT_*`) and `DEVICE_SECRET` are not: firmware never sees the device's credentials. The version a device runs is no longer a setting: it is whatever is installed, starting with the factory firmware 1.0.
 
 ## How updates work
 
@@ -93,6 +96,7 @@ The agent never rolls back by itself because of crashes or errors: it reports th
 - **Batches.** Devices start 5 at a time with a 2 s pause (`--batch`, `--pause`), so the broker is not hit by every connection at once. `up` waits until every device has connected and lists any that did not, with their last log line.
 - **Size.** The default is 10. Up to 50 is allowed (NF-4); more needs `--force` (scale testing in Iteration 4). Running `up` with a smaller number removes the devices above it; running it again with the same number starts only what is missing.
 - **Broker.** `MQTT_HOST` and `MQTT_PORT` come from `.env` (or `--host`, `--port`), so the same command works for a local control plane and the cloud VM.
+- **Credentials.** Each device gets only its own password, derived from `DEVICE_SECRET` (environment, `.env`, or `deploy/mqtt/generated/device.env`), and the CA certificate (`--ca`, `MQTT_CA_FILE`, default `deploy/mqtt/generated/ca.crt`). With a cloud control plane, copy those two files from the VM first (see `deploy/cloud-vm-setup.md`).
 - **One launch path at a time.** It refuses to start while the demo's devices or this folder's Compose `device-001` are running: two devices with the same ID keep disconnecting each other.
 
 Fleet containers are named `ota-fleet-device-NNN`, carry the label `ota-fleet=device`, restart by themselves if they crash (not after `stop`), and keep at most 10 MB of logs each.
@@ -111,7 +115,7 @@ Memory grows linearly at about 13 MiB per device and CPU is negligible, so 50 de
 
 ## Add a device to the Compose file
 
-The Compose file (see [Run](#run)) holds one device. To add one by hand, copy the `device-001` block, change the service name and `DEVICE_ID`, and run `docker compose up -d`. For more than a couple of devices, use `fleet.sh`.
+The Compose file (see [Run](#run)) holds one device. To add one by hand, copy the `device-001` block, change the service name, `DEVICE_ID` and its password variable (`DEVICE_002_PASSWORD`, from `tools/mqtt_security.py device-password device-002`), and run `docker compose up -d`. For more than a couple of devices, use `fleet.sh`.
 
 ## Notes
 

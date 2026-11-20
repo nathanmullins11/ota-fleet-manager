@@ -98,6 +98,11 @@ def release():
 
 
 @pytest.fixture(scope="session")
+def mqtt_security():
+    return load_service_module("tools", "mqtt_security")
+
+
+@pytest.fixture(scope="session")
 def rollout_logic():
     return load_service_module("orch", "rollout_logic")
 

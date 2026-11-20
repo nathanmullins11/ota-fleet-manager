@@ -28,9 +28,10 @@ if [[ "$SIMULATE" == 1 ]]; then
 fi
 
 # --------------------------------------------------------------------------- real device
-say "Now an attack on a real device. The broker has no authentication until Iteration 3, so"
-say "anyone on the network can publish to a device's command topic. Two forged update commands"
-say "are sent to device-002; it must verify before installing (FR-3) and refuse both."
+say "Now an attack on a real device. The broker already blocks strangers (the step before), so"
+say "this assumes an attacker got past it anyway, for example with stolen admin credentials."
+say "Two forged update commands are sent to device-002; as a second line of defence it must"
+say "verify before installing (FR-3) and refuse both."
 echo
 pkg_url="$REGISTRY_URL/packages/2.0"
 sha_20=$(json_field sha256 <"$REPO_ROOT/deploy/registries/software/packages/2.0/manifest.json")

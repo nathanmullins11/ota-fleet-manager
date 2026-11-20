@@ -12,3 +12,9 @@ deploy/device-agent/fleet-stats/
 # Coverage data (pytest --cov)
 .coverage
 coverage.xml
+
+# Broker certificates, keys and passwords (tools/mqtt_security.py setup)
+deploy/mqtt/generated/
+demo/.generated/
+demo/cloud/ca.crt
+demo/cloud/device.env

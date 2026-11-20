@@ -29,6 +29,11 @@ class Config:
     # password is set (db.Database.ensure_dashboard_reader).
     dashboard_db_user: str = "dashboard_reader"
     dashboard_db_password: str = ""
+    # Broker sign-in and TLS (FR-7): the orchestrator's own account, and the CA that signed
+    # the broker's certificate. Empty means anonymous / plain text (tests only).
+    mqtt_username: str = ""
+    mqtt_password: str = ""
+    mqtt_ca_cert: str = ""
 
     def health_limits(self):
         from rollout_logic import HealthLimits
@@ -64,4 +69,7 @@ def load_config() -> Config:
         unresponsive_seconds=int(os.environ.get("HEALTH_UNRESPONSIVE_SECONDS", "45")),
         dashboard_db_user=os.environ.get("GRAFANA_DB_USER", "dashboard_reader"),
         dashboard_db_password=os.environ.get("GRAFANA_DB_PASSWORD", ""),
+        mqtt_username=os.environ.get("MQTT_USERNAME", ""),
+        mqtt_password=os.environ.get("MQTT_PASSWORD", ""),
+        mqtt_ca_cert=os.environ.get("MQTT_CA_CERT", ""),
     )

@@ -137,6 +137,9 @@ jobs:
     timeout-minutes: 15
     env:
       POSTGRES_PASSWORD: ci-only-not-a-secret   # Compose refuses to start without one
+      MQTT_ORCHESTRATOR_PASSWORD: ci-only-not-a-secret
+      MQTT_OPS_PASSWORD: ci-only-not-a-secret
+      DEVICE_001_PASSWORD: ci-only-not-a-secret
     steps:
       - uses: actions/checkout@v4
 
