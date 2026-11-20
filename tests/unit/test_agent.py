@@ -7,7 +7,7 @@ pytestmark = pytest.mark.unit
 @pytest.fixture
 def env(monkeypatch):
     for key in ("DEVICE_ID", "HEARTBEAT_INTERVAL_SECONDS", "MQTT_PORT", "FIRMWARE_DIR",
-                "FIRMWARE_START_TIMEOUT_SECONDS"):
+                "FIRMWARE_START_TIMEOUT_SECONDS", "MQTT_USERNAME", "MQTT_PASSWORD", "MQTT_CA_CERT"):
         monkeypatch.delenv(key, raising=False)
 
     def set_env(**values):
@@ -22,6 +22,28 @@ def test_valid_config(agent_config, env, tmp_path):
     assert (cfg.device_id, cfg.firmware_dir) == ("device-001", tmp_path)
     assert (cfg.factory_dir / "1.0" / "manifest.json").is_file()
     assert cfg.public_key_path.is_file()
+
+
+
+def test_broker_sign_in_defaults_to_the_device_id(agent_config, env, tmp_path):
+    env(DEVICE_ID="device-004", FIRMWARE_DIR=str(tmp_path), MQTT_PASSWORD="pw",
+        MQTT_CA_CERT="/run/ota/ca.crt")
+    cfg = agent_config.load_config()
+    assert (cfg.mqtt_username, cfg.mqtt_password, cfg.mqtt_ca_cert) == (
+        "device-004", "pw", "/run/ota/ca.crt")
+
+
+def test_agent_client_uses_tls_and_its_own_account(agent, agent_config, env, tmp_path,
+                                                   monkeypatch):
+    env(DEVICE_ID="device-004", FIRMWARE_DIR=str(tmp_path), MQTT_PASSWORD="pw",
+        MQTT_CA_CERT="/run/ota/ca.crt")
+    calls = {}
+    monkeypatch.setattr(agent.mqtt.Client, "username_pw_set",
+                        lambda self, *a: calls.__setitem__("sign_in", a))
+    monkeypatch.setattr(agent.mqtt.Client, "tls_set",
+                        lambda self, **kw: calls.__setitem__("tls", kw))
+    agent.build_client(agent_config.load_config(), None, None)
+    assert calls == {"sign_in": ("device-004", "pw"), "tls": {"ca_certs": "/run/ota/ca.crt"}}
 
 
 @pytest.mark.parametrize("device_id", ["device-001\n", "device-١٢٣", "device-01", ""])

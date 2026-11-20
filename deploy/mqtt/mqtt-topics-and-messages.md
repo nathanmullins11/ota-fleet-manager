@@ -225,6 +225,20 @@ Fields are the same as the update command. `target_version` here is the version 
 
 **Client IDs:** each device uses its device ID as its MQTT client ID (for example `device-001`), and the orchestrator uses `orchestrator`. Two clients with the same ID disconnect each other, so IDs must be unique.
 
+**Connection security (FR-7, NF-3):**
+
+- The broker listens only on **8883 with TLS** (1.2 or newer). Clients verify its certificate against the project's CA (`deploy/mqtt/generated/ca.crt`, made by `tools/mqtt_security.py setup`), so a fake broker can't pose as ours.
+- **Every client signs in**; anonymous clients are refused. Accounts:
+
+| Account | Password | May publish | May subscribe |
+|---|---|---|---|
+| `device-NNN` | First 32 hex characters of HMAC-SHA256(`DEVICE_SECRET`, device ID) | `ota/devices/<own id>/heartbeat`, `ota/devices/<own id>/events` | `ota/devices/<own id>/commands` |
+| `orchestrator` | `MQTT_ORCHESTRATOR_PASSWORD` | `ota/devices/+/commands` | `ota/devices/+/heartbeat`, `ota/devices/+/events` |
+| `ops` | `MQTT_OPS_PASSWORD` | `ota/#` | `ota/#`, `$SYS/#` |
+
+- The rules are in `deploy/mqtt/acl`. A publish the ACL does not allow is dropped silently by the broker (MQTT 3.1.1 has no error for it), so a device can't speak for another device or send commands.
+- Messages larger than **64 KB** are refused; the largest real message is under 1 KB.
+
 ## 6. Open questions for David (To confirm)
 
 1. **Heartbeat fields.** Are version, status, error count, and timestamp enough? Anything else the agent can report cheaply (uptime, CPU)? If so, a column is added to `heartbeats` before data is collected.
@@ -241,13 +255,15 @@ With Mosquitto running locally and the `mosquitto-clients` tools installed, this
 In one terminal, listen like the orchestrator:
 
 ```bash
-mosquitto_sub -h localhost -t "ota/devices/+/heartbeat" -v
+mosquitto_sub -h localhost -p 8883 --cafile deploy/mqtt/generated/ca.crt -u ops -P "$MQTT_OPS_PASSWORD" \
+    -t "ota/devices/+/heartbeat" -v
 ```
 
 In another, publish like a device:
 
 ```bash
-mosquitto_pub -h localhost -q 0 -t "ota/devices/device-001/heartbeat" -m '{"schema_version":1,"device_id":"device-001","version":"1.0","status":"healthy","error_count":0,"timestamp":"2026-10-29T14:03:07Z"}'
+mosquitto_pub -h localhost -p 8883 --cafile deploy/mqtt/generated/ca.crt -u device-001 \
+    -P "$(python tools/mqtt_security.py device-password device-001)" -q 0 -t "ota/devices/device-001/heartbeat" -m '{"schema_version":1,"device_id":"device-001","version":"1.0","status":"healthy","error_count":0,"timestamp":"2026-10-29T14:03:07Z"}'
 ```
 
 The first terminal should print the topic and the message. This is also the easiest way to test the orchestrator skeleton before the device agent exists.
@@ -260,3 +276,4 @@ The first terminal should print the topic and the message. This is also the easi
 | 2026-11-04 | Stricter validation: UTC-only timestamps, integer ranges, exact-match IDs and versions | (pending review) |
 | 2026-11-11 | Device behavior rules settled with the device update logic: queue commands while busy, `already running` answer, `invalid command` answer, revert when new firmware does not start | (pending review) |
 | 2026-11-15 | Optional heartbeat fields `cpu_percent` and `memory_mb`; rejected messages and refused commands are recorded | (pending review) |
+| 2026-11-18 | TLS only on 8883, per-client accounts and topic ACL, 64 KB message limit (section 5) | (pending review) |

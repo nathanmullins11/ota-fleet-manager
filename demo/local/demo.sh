@@ -43,6 +43,14 @@ export REGISTRY_URL=http://host.docker.internal:8080
 export POSTGRES_PASSWORD="demo-$RANDOM$RANDOM"
 export GRAFANA_ADMIN_PASSWORD="demo-$RANDOM$RANDOM"
 export GRAFANA_DB_PASSWORD="demo-$RANDOM$RANDOM"
+# Broker sign-in (FR-7): throwaway passwords and device secret for this run. The broker's
+# certificates and password file go to demo/.generated/ (git-ignored), not deploy/mqtt/.
+export MQTT_ORCHESTRATOR_PASSWORD="demo-$RANDOM$RANDOM"
+export MQTT_OPS_PASSWORD="demo-$RANDOM$RANDOM"
+export DEVICE_SECRET="demo-$RANDOM$RANDOM$RANDOM"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export MQTT_SECURITY_DIR="$REPO_DIR/demo/.generated"
+export CA_CERT="$MQTT_SECURITY_DIR/ca.crt"
 # Devices that never answer a command are marked failed after this; short, so a missing
 # device feature does not hold up the next step for two minutes.
 export COMMAND_TIMEOUT_SECONDS=30
@@ -68,7 +76,7 @@ cleanup() {
 
 require_docker
 check_no_other_devices
-for port in 1883 3000 5432 8080; do
+for port in 8883 3000 5432 8080; do
     if port_open 127.0.0.1 "$port"; then
         die "Port $port is already in use on this machine, so the demo control plane cannot start.
   If your own control plane is running, stop it first:  (cd deploy && docker compose down)
@@ -90,6 +98,8 @@ trap 'exit 130' INT
 banner "OTA Update Fleet Manager — local demo" \
        "Control plane and $DEVICE_COUNT simulated devices on this machine"
 build_images
+info "Creating the broker's TLS certificates and passwords (tools/mqtt_security.py)..."
+security_setup "$MQTT_SECURITY_DIR" | indent
 [[ "${SIMULATE:-0}" == 1 ]] && warn "--simulate: device replies are faked by the demo (marked SIMULATED)."
 pause 1
 

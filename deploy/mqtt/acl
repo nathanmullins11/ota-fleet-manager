@@ -1,0 +1,18 @@
+# Mosquitto access list: who may read and write which topics (STRIDE S2).
+# Anything not allowed here is refused: a client publishing elsewhere is silently dropped.
+
+# The orchestrator reads every device's reports and sends commands.
+user orchestrator
+topic read ota/devices/+/heartbeat
+topic read ota/devices/+/events
+topic write ota/devices/+/commands
+
+# ops: the demo's listener and test messages, and administration. Every topic.
+user ops
+topic readwrite ota/#
+topic read $SYS/#
+
+# Every device (its username is its device ID): only its own topics.
+pattern write ota/devices/%u/heartbeat
+pattern write ota/devices/%u/events
+pattern read ota/devices/%u/commands

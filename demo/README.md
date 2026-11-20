@@ -31,9 +31,10 @@ The script exits with status 1 if any check is NOT WORKING, so CI runs it as the
 | 1 | Control plane started by one compose command, all services healthy | NF-6 |
 | 2 | Ten simulated devices (`--devices N` for 10 to 50) connect over MQTT and register with version 1.0 and a heartbeat | FR-1, FR-8 |
 | 3 | Three malformed heartbeats are rejected and logged with the reason | Message contract, NF-5 |
+| 3a | Broker security: port 1883 is closed; an anonymous client, a wrong password and a client that doesn't trust the project CA are refused; device-002, signed in with its real password, can't publish as device-005 or send itself a command | FR-7, NF-3, NF-5 |
 | 4 | Faulty firmware 2.1 is rolled out to the whole fleet in stages (3, 3, 4): only the canary group (device-001 to 003) gets it, reports errors and crashes, and the orchestrator halts and rolls the canaries back by itself within 60 s; the other devices never receive 2.1 | FR-2, FR-4, FR-5, FR-8 |
 | 5 | A stopped device is marked offline after the 30 s timeout, then back online on its next heartbeat | Timeout requirement, NF-1 |
-| 6 | The registry's signed firmware: the reference checks accept the genuine package and reject a flipped bit, a forged manifest, a different signing key and a replayed version. Then two forged update commands are published straight to device-002 (the broker has no authentication yet); it must refuse both and stay on 1.0 | FR-6, FR-3 |
+| 6 | The registry's signed firmware: the reference checks accept the genuine package and reject a flipped bit, a forged manifest, a different signing key and a replayed version. Then two forged update commands are published straight to device-002, as an attacker with stolen admin broker credentials could; it must refuse both and stay on 1.0 | FR-6, FR-3 |
 | 7 | Staged rollout of 2.0 (1, then 3, then 6 devices): each stage starts only after every device in the previous one is healthy; device-009 drops off and is judged 'not reached' without stopping the rollout; the rollout completes | FR-2, FR-3, FR-4, NF-1, NF-5 |
 | 8 | Rollback of that rollout: each device must report `rollback_succeeded` and 1.0 again; the rollout must end `rolled_back` | FR-5 path, NF-1, NF-5 |
 
@@ -56,7 +57,7 @@ demo/local/demo.sh --detail   # full evidence (device logs, processes, raw messa
 demo/local/demo.sh --keep     # leave everything running afterwards
 ```
 
-It runs its own copy of the control plane (compose project `ota-demo`) with a fresh database, and removes it and the devices at the end, so it does not touch a stack you run yourself from `deploy/`. Ports 1883, 5432 and 8080 must be free: stop your own stack first with `(cd deploy && docker compose down)`.
+It runs its own copy of the control plane (compose project `ota-demo`) with a fresh database, and removes it and the devices at the end, so it does not touch a stack you run yourself from `deploy/`. Ports 8883, 3000, 5432 and 8080 must be free: stop your own stack first with `(cd deploy && docker compose down)`.
 
 ## Cloud
 
@@ -65,7 +66,7 @@ It runs its own copy of the control plane (compose project `ota-demo`) with a fr
 | Port | For |
 |---|---|
 | 22 | SSH |
-| 1883 | Devices to the MQTT broker |
+| 8883 | Devices to the MQTT broker (TLS) |
 | 8080 | Step 6 (and firmware downloads from Iteration 2). Without it, step 6 is skipped with a warning |
 
 The VM's checkout must be on a branch that contains `demo/` (`git checkout <branch>` in `~/ota-fleet-manager`).
@@ -90,22 +91,30 @@ Keys in the live view: **f** rolls out the faulty 2.1 to device-003 (step 4), **
 
 Ctrl+C (or q) closes the live view; the control plane keeps running. `--view` reopens just the view; `--no-pull` skips `git pull`.
 
-**Terminal 2, on your computer**, from the repository root:
+**Terminal 2, on your computer**, from the repository root. The first time (and whenever the VM's broker certificates are recreated), copy the CA certificate and device secret that `control-plane.sh` made; it prints this command:
+
+```bash
+scp ubuntu@<vm-ip>:ota-fleet-manager/deploy/mqtt/generated/{ca.crt,device.env} demo/cloud/
+```
+
+Then:
 
 ```bash
 demo/cloud/devices.sh <vm-ip>           # Enter between steps
 demo/cloud/devices.sh <vm-ip> --auto
 ```
 
-It checks ports 1883 and 8080 on the VM, starts the devices, and walks through the steps. Where the result is on the VM, it prints **👉 On the VM terminal: ...** with what to point at. The devices are removed at the end; the control plane keeps running (and marks them offline 30 s later).
+It checks ports 8883 and 8080 on the VM, starts the devices, and walks through the steps. Where the result is on the VM, it prints **👉 On the VM terminal: ...** with what to point at. The devices are removed at the end; the control plane keeps running (and marks them offline 30 s later).
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---|---|
-| `Port 1883 is already in use` (local) | Your own control plane is running: `(cd deploy && docker compose down)` |
+| `Port 8883 is already in use` (local) | Your own control plane is running: `(cd deploy && docker compose down)` |
 | `Devices from deploy/device-agent are already running` | `(cd deploy/device-agent && docker compose down)`; two devices with the same ID keep disconnecting each other |
-| `MQTT broker <ip>:1883 is not reachable` | Is `control-plane.sh` running? Does the security group allow 1883 from your current IP (`curl -4 ifconfig.me`)? Some campus and work networks block 1883 |
+| `MQTT broker <ip>:8883 is not reachable` | Is `control-plane.sh` running? Does the security group allow 8883 from your current IP (`curl -4 ifconfig.me`)? Some campus and work networks block it |
+| `Copy the broker's CA certificate and device secret` (cloud) | Run the `scp` command above |
+| Devices log `certificate verify failed` or `Not authorized` (cloud) | `demo/cloud/ca.crt` or `device.env` is from an older setup: copy both again |
 | Step 6 skipped | Open TCP 8080 to your IP in the security group |
 | Step 7 waits for update commands after you press u | Look at the Last action panel: a rollout from an earlier run may still be active (`cli.py rollout list`). Roll it back with b, or start clean with `--reset` |
 | `git pull failed` on the VM | Local changes or a branch without an upstream: fix it, or run with `--no-pull` |

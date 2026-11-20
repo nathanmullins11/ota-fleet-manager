@@ -31,17 +31,23 @@ def mosquitto_settings(text: str) -> dict:
 
 # =========================================================================== S: Spoofing
 
-@open_gap("S1", "the broker accepts anonymous clients until Iteration 3 (FR-7, NF-3)")
 def test_S1_broker_rejects_anonymous_clients(read_repo):
     conf = mosquitto_settings(read_repo("deploy/mqtt/mosquitto.conf"))
     assert conf.get("allow_anonymous") == ["false"]
     assert "password_file" in conf or "require_certificate" in conf
 
 
-@open_gap("S2", "no ACL, so any client can publish heartbeats, events or commands for any device")
 def test_S2_broker_limits_each_client_to_its_own_topics(read_repo):
     conf = mosquitto_settings(read_repo("deploy/mqtt/mosquitto.conf"))
-    assert "acl_file" in conf
+    assert conf.get("acl_file") == ["/mosquitto/config/acl"]
+    acl = [line.split() for line in read_repo("deploy/mqtt/acl").splitlines()
+           if line.strip() and not line.lstrip().startswith("#")]
+    # Devices: only their own topics (%u = the signed-in user name), and never their commands.
+    patterns = {(rule[1], rule[2]) for rule in acl if rule[0] == "pattern"}
+    assert patterns == {("write", "ota/devices/%u/heartbeat"), ("write", "ota/devices/%u/events"),
+                        ("read", "ota/devices/%u/commands")}
+    # No rule outside a "user" block (which would apply to every client).
+    assert acl[0][0] in ("user", "pattern")
 
 
 def test_S3_heartbeat_for_another_device_is_rejected(messages):
@@ -227,19 +233,20 @@ def test_I2_database_is_reachable_only_from_the_host(read_repo):
     assert published == ["127.0.0.1:5432:5432"]
 
 
-@open_gap("I3", "MQTT traffic (commands, heartbeats, events) is plain text until Iteration 3")
 def test_I3_broker_listens_with_tls_only(read_repo):
     conf = mosquitto_settings(read_repo("deploy/mqtt/mosquitto.conf"))
     assert "certfile" in conf and "keyfile" in conf
-    assert "1883" not in conf.get("listener", [])
+    assert conf.get("listener") == ["8883"]
+    compose = read_repo("deploy/docker-compose.yml")
+    assert "1883" not in compose
 
 
-@open_gap("I4", "firmware inherits the agent's whole environment, including future broker credentials")
 def test_I4_firmware_does_not_inherit_agent_secrets(firmware_runner, monkeypatch, tmp_path):
     monkeypatch.setenv("MQTT_PASSWORD", "device-secret")
     monkeypatch.setenv("MQTT_USERNAME", "device-001")
+    monkeypatch.setenv("DEVICE_SECRET", "fleet-secret")
     env = firmware_runner.FirmwareRunner(state_dir=tmp_path)._env()
-    assert "MQTT_PASSWORD" not in env and "MQTT_USERNAME" not in env
+    assert not {"MQTT_PASSWORD", "MQTT_USERNAME", "DEVICE_SECRET"} & env.keys()
     assert env["FIRMWARE_STATE_DIR"] == str(tmp_path)
 
 
@@ -280,7 +287,6 @@ def test_D1_forged_manifest_stops_before_the_package_is_downloaded(installer, si
     assert fetched == ["m", "s"]
 
 
-@open_gap("D2", "no message size limit on the broker; one client can send very large messages")
 def test_D2_broker_limits_message_size(read_repo):
     conf = mosquitto_settings(read_repo("deploy/mqtt/mosquitto.conf"))
     assert "max_packet_size" in conf or "message_size_limit" in conf

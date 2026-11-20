@@ -5,6 +5,9 @@
 #   CP_PROJECT     compose project name of the control plane (empty: the compose file's own)
 #   MQTT_HOST      broker address as seen from a container on this machine
 #   REGISTRY_URL   software registry base URL as seen from a container on this machine
+#   CA_CERT        the broker CA certificate (ca.crt) that devices and tools verify the broker with
+#   DEVICE_SECRET  each device's broker password is derived from it (one per device)
+#   MQTT_OPS_PASSWORD  the ops broker account, for the demo's listener and test messages
 #   AUTO           1 to run without waiting for Enter
 #   DETAIL         1 to show full evidence (device logs, processes, raw messages)
 
@@ -15,7 +18,7 @@ COMPOSE_FILE="$REPO_ROOT/deploy/docker-compose.yml"
 AUTO=${AUTO:-0}
 CP_LOCAL=${CP_LOCAL:-1}
 CP_PROJECT=${CP_PROJECT:-}
-MQTT_PORT=${MQTT_PORT:-1883}
+MQTT_PORT=${MQTT_PORT:-8883}             # TLS only (FR-7)
 DEVICE_COUNT=${DEVICE_COUNT:-10}
 REGISTRY_REACHABLE=${REGISTRY_REACHABLE:-1}
 SIMULATE=${SIMULATE:-0}
@@ -42,7 +45,7 @@ else
     BOLD="" DIM="" RED="" GREEN="" YELLOW="" BLUE="" CYAN="" RESET=""
 fi
 
-STEP_NO=0
+STEP_NO=00     # the running step's file prefix (01, 03a, ...): its number on screen and in reports
 
 banner() {
     local line
@@ -55,9 +58,12 @@ banner() {
 
 # step "Title" "Requirements covered"
 step() {
-    STEP_NO=$((STEP_NO + 1))
     STEP_TITLE=$1
-    printf '\n%s━━ Step %d: %s%s\n' "$BOLD$BLUE" "$STEP_NO" "$1" "$RESET"
+    if [[ "$STEP_NO" == 99 ]]; then
+        printf '\n%s━━ %s%s\n' "$BOLD$BLUE" "$1" "$RESET"
+    else
+        printf '\n%s━━ Step %s: %s%s\n' "$BOLD$BLUE" "${STEP_NO#0}" "$1" "$RESET"
+    fi
     [[ -n "${2:-}" ]] && printf '   %sCovers: %s%s\n' "$DIM" "$2" "$RESET"
     echo
 }
@@ -191,6 +197,19 @@ build_images() {
     docker image inspect "$MQTT_IMAGE" >/dev/null 2>&1 || docker pull -q "$MQTT_IMAGE" >/dev/null
 }
 
+# security_setup OUT_DIR [--host H ...]: broker certificates and password file
+# (tools/mqtt_security.py), run in the tools image so the host needs only Docker.
+# Uses DEVICE_SECRET, MQTT_ORCHESTRATOR_PASSWORD and MQTT_OPS_PASSWORD from the environment.
+security_setup() {
+    local out=$1
+    shift
+    mkdir -p "$out"
+    docker run --rm --user "$(id -u):$(id -g)" -v "$REPO_ROOT/tools:/tools:ro" -v "$out:/out" \
+        -e DEVICE_SECRET -e MQTT_ORCHESTRATOR_PASSWORD -e MQTT_OPS_PASSWORD \
+        "$TOOLS_IMAGE" python -I /tools/mqtt_security.py setup --out /out \
+        --env-file /nonexistent "$@"
+}
+
 # A device from deploy/device-agent's own compose stack would share an MQTT client ID
 # with a demo device, and the broker would keep disconnecting one of them.
 check_no_other_devices() {
@@ -206,11 +225,21 @@ check_no_other_devices() {
     fi
 }
 
+# device_password DEVICE_ID: that device's broker password, derived from DEVICE_SECRET the same
+# way as tools/mqtt_security.py (HMAC-SHA256, first 32 hex characters).
+device_password() {
+    printf '%s' "$1" | openssl dgst -sha256 -hmac "$DEVICE_SECRET" | awk '{print $NF}' | cut -c1-32
+}
+
 start_device() {
-    local i=$1
+    local i=$1 id
+    id=$(device_id "$i")
     docker rm -f "$(device_name "$i")" >/dev/null 2>&1 || true
+    # TLS to the broker, verified against our CA, signed in with this device's own password.
     docker run -d --name "$(device_name "$i")" --label "$DEMO_LABEL" "${HOST_GATEWAY[@]}" \
-        -e DEVICE_ID="$(device_id "$i")" \
+        -v "$CA_CERT:/etc/ota/ca.crt:ro" \
+        -e DEVICE_ID="$id" -e MQTT_PASSWORD="$(device_password "$id")" \
+        -e MQTT_CA_CERT=/etc/ota/ca.crt \
         -e MQTT_HOST="$MQTT_HOST" -e MQTT_PORT="$MQTT_PORT" \
         -e HEARTBEAT_INTERVAL_SECONDS=5 \
         "$DEVICE_IMAGE" >/dev/null
@@ -296,10 +325,22 @@ rollout_timing() {
         "${first:11:8}" "$kind" "${last:11:8}" "$took"
 }
 
-# mqtt_pub TOPIC PAYLOAD: publish as an outside client, the way a device would.
+# mqtt_pub TOPIC PAYLOAD: publish a test message with the ops account (allowed every topic).
 mqtt_pub() {
-    docker run --rm "${HOST_GATEWAY[@]}" "$MQTT_IMAGE" \
-        mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -q 1 -i "ota-demo-publisher" -t "$1" -m "$2"
+    mqtt_client ops "$MQTT_OPS_PASSWORD" "$1" "$2" >/dev/null
+}
+
+# mqtt_client USER PASSWORD TOPIC PAYLOAD [extra mosquitto_pub options]: one publish over TLS,
+# verifying the broker with our CA. USER "" connects anonymously. Prints the client's output;
+# returns its exit status (non-zero when the broker refuses the connection).
+mqtt_client() {
+    local user=$1 pass=$2 topic=$3 payload=$4
+    shift 4
+    local auth=()
+    [[ -n "$user" ]] && auth=(-u "$user" -P "$pass")
+    docker run --rm "${HOST_GATEWAY[@]}" -v "$CA_CERT:/etc/ota/ca.crt:ro" "$MQTT_IMAGE" \
+        mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" --cafile /etc/ota/ca.crt "${auth[@]}" \
+        -q 1 -i "ota-demo-${user:-anonymous}-$RANDOM" -t "$topic" -m "$payload" "$@" 2>&1
 }
 
 # publish_event DEVICE EVENT ROLLOUT_ID VERSION [REASON]: an event as the device would send it.
@@ -358,8 +399,9 @@ start_listener() {
     docker rm -f "$LISTENER" >/dev/null 2>&1 || true
     # Restarted automatically if the broker connection drops (logs survive restarts).
     docker run -d --name "$LISTENER" --label "$DEMO_LABEL" --restart unless-stopped \
-        "${HOST_GATEWAY[@]}" "$MQTT_IMAGE" \
-        mosquitto_sub -h "$MQTT_HOST" -p "$MQTT_PORT" -q 1 -i ota-demo-listener -F '%I %t %p' \
+        "${HOST_GATEWAY[@]}" -v "$CA_CERT:/etc/ota/ca.crt:ro" "$MQTT_IMAGE" \
+        mosquitto_sub -h "$MQTT_HOST" -p "$MQTT_PORT" --cafile /etc/ota/ca.crt \
+        -u ops -P "$MQTT_OPS_PASSWORD" -q 1 -i ota-demo-listener -F '%I %t %p' \
         -t 'ota/devices/+/heartbeat' -t 'ota/devices/+/events' -t 'ota/devices/+/commands' \
         >/dev/null
 }
@@ -573,7 +615,7 @@ write_junit() {
             result=${CHECKS[$i]%%|*}
             text=$(printf '%s' "${CHECKS[$i]#*|}" | xml_escape)
             step=${CHECK_STEPS[$i]}
-            name=$(printf 'Step %02d: %s' "${step%%|*}" "${step#*|}" | xml_escape)
+            name=$(printf 'Step %s: %s' "${step%%|*}" "${step#*|}" | xml_escape)
             seen=$(printf '%s' "${CHECK_SEEN[$i]}" | xml_escape)
             printf '  <testcase classname="e2e.%s" name="%s" time="0">' "$name" "$text"
             case "$result" in
@@ -591,6 +633,8 @@ write_junit() {
 run_steps() {
     local f
     for f in "$DEMO_DIR"/steps/[0-9]*.sh; do
+        # Steps are numbered by their file name, so docs can refer to "step 3a".
+        STEP_NO=$(basename "$f"); STEP_NO=${STEP_NO%%-*}
         # shellcheck source=/dev/null
         source "$f"
     done

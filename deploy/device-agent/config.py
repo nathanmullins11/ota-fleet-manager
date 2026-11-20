@@ -25,6 +25,12 @@ class Config:
     start_timeout_seconds: float      # new firmware must report a status within this time
     restart_delay_seconds: float      # wait before restarting crashed firmware
     download_timeout_seconds: float
+    # Broker sign-in and TLS (FR-7). The username defaults to the device ID; the password is
+    # this device's own (derived from DEVICE_SECRET by the launcher). mqtt_ca_cert: the CA
+    # that signed the broker's certificate; empty means plain text (tests only).
+    mqtt_username: str = ""
+    mqtt_password: str = ""
+    mqtt_ca_cert: str = ""
 
 
 def _positive_float(name: str, default: str) -> float:
@@ -60,4 +66,7 @@ def load_config() -> Config:
         start_timeout_seconds=_positive_float("FIRMWARE_START_TIMEOUT_SECONDS", "5"),
         restart_delay_seconds=_positive_float("FIRMWARE_RESTART_DELAY_SECONDS", "2"),
         download_timeout_seconds=_positive_float("DOWNLOAD_TIMEOUT_SECONDS", "15"),
+        mqtt_username=os.environ.get("MQTT_USERNAME", device_id),
+        mqtt_password=os.environ.get("MQTT_PASSWORD", ""),
+        mqtt_ca_cert=os.environ.get("MQTT_CA_CERT", ""),
     )

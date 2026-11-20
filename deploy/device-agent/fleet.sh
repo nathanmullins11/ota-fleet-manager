@@ -11,7 +11,9 @@
 #
 # Options for up:
 #   --host H        broker address (default: MQTT_HOST in .env, else host.docker.internal)
-#   --port P        broker port (default: MQTT_PORT in .env, else 1883)
+#   --port P        broker port (default: MQTT_PORT in .env, else 8883, TLS)
+#   --ca FILE       CA certificate the devices verify the broker with
+#                   (default: MQTT_CA_FILE in .env, else ../mqtt/generated/ca.crt)
 #   --batch B       devices started per batch (default 5)
 #   --pause S       seconds between batches (default 2)
 #   --force         allow more than 50 devices
@@ -21,6 +23,9 @@
 #   --out FILE      CSV file (default fleet-stats/fleet-stats-<time>.csv)
 #
 # Settings are read from .env in this folder (the same file docker-compose.yml uses).
+# DEVICE_SECRET (environment, .env, or ../mqtt/generated/device.env written by
+# tools/mqtt_security.py setup) gives each device its own broker password; a device is given
+# only its own password, never the secret.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,7 +44,7 @@ ok()   { printf '%s✔%s %s\n' "$GREEN" "$RESET" "$*"; }
 warn() { printf '%s!%s %s\n' "$YELLOW" "$RESET" "$*"; }
 info() { printf '%s%s%s\n' "$DIM" "$*" "$RESET"; }
 die()  { printf '%s✘ %s%s\n' "$RED" "$*" "$RESET" >&2; exit 1; }
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Read KEY=VALUE lines from .env without executing it; the environment wins over the file.
 load_env() {
@@ -51,6 +56,23 @@ load_env() {
         value=${value#\"}; value=${value%\"}
         [[ -z "${!key:-}" ]] && export "$key=$value"
     done <"$HERE/.env"
+}
+
+# Same derivation as tools/mqtt_security.py: HMAC-SHA256(DEVICE_SECRET, device ID), 32 hex chars.
+device_password() {
+    printf '%s' "$1" | openssl dgst -sha256 -hmac "$DEVICE_SECRET" -r | cut -c1-32
+}
+
+# DEVICE_SECRET from the environment or .env (load_env), else the setup tool's device.env.
+load_device_secret() {
+    local generated="$HERE/../mqtt/generated/device.env" line
+    if [[ -z "${DEVICE_SECRET:-}" && -r "$generated" ]]; then
+        line=$(grep '^DEVICE_SECRET=' "$generated" | tail -n 1)
+        DEVICE_SECRET=${line#DEVICE_SECRET=}
+    fi
+    [[ -n "${DEVICE_SECRET:-}" ]] || die "DEVICE_SECRET is not set. Run tools/mqtt_security.py setup
+  on the control plane and copy its device.env here, or set DEVICE_SECRET in .env."
+    command -v openssl >/dev/null || die "openssl is needed to derive the device passwords."
 }
 
 container_name() { printf '%s%s' "$PREFIX" "$1"; }
@@ -103,11 +125,13 @@ valid_id() { [[ "$1" =~ $DEVICE_ID_RE ]] || die "Device IDs look like device-001
 
 cmd_up() {
     local count=10 batch=5 pause=2 force=0 build=1
-    local host=${MQTT_HOST:-host.docker.internal} port=${MQTT_PORT:-1883}
+    local host=${MQTT_HOST:-host.docker.internal} port=${MQTT_PORT:-8883}
+    local ca=${MQTT_CA_FILE:-$HERE/../mqtt/generated/ca.crt}
     while (($#)); do
         case "$1" in
             --host) host=$2; shift ;;
             --port) port=$2; shift ;;
+            --ca) ca=$2; shift ;;
             --batch) batch=$2; shift ;;
             --pause) pause=$2; shift ;;
             --force) force=1 ;;
@@ -120,6 +144,11 @@ cmd_up() {
     [[ "$count" =~ ^[0-9]+$ ]] && ((count >= 1)) || die "The fleet size must be a positive number."
     ((count <= MAX_DEVICES || force)) || die "More than $MAX_DEVICES devices needs --force (NF-4 targets 10 to 50)."
     [[ "$batch" =~ ^[0-9]+$ ]] && ((batch >= 1)) || die "--batch must be a positive number."
+
+    [[ -r "$ca" ]] || die "No CA certificate at $ca (the control plane's
+  deploy/mqtt/generated/ca.crt; pass --ca FILE or set MQTT_CA_FILE)."
+    ca=$(cd "$(dirname "$ca")" && pwd)/$(basename "$ca")
+    load_device_secret
 
     check_conflicts
     if ((build)); then
@@ -152,6 +181,8 @@ cmd_up() {
                     --add-host host.docker.internal:host-gateway \
                     --log-opt max-size=5m --log-opt max-file=2 \
                     -e DEVICE_ID="$id" -e MQTT_HOST="$host" -e MQTT_PORT="$port" \
+                    -e MQTT_PASSWORD="$(device_password "$id")" \
+                    -v "$ca:/run/ota/ca.crt:ro" -e MQTT_CA_CERT=/run/ota/ca.crt \
                     -e HEARTBEAT_INTERVAL_SECONDS="${HEARTBEAT_INTERVAL_SECONDS:-5}" \
                     -e LOG_LEVEL="${LOG_LEVEL:-INFO}" \
                     "$IMAGE" >/dev/null || die "Could not start $id."

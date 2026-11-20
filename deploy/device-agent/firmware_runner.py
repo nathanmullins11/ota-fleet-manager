@@ -174,7 +174,11 @@ class FirmwareRunner:
                          daemon=True).start()
 
     def _env(self) -> dict:
-        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        # The firmware gets the agent's environment minus its secrets: broker credentials
+        # (MQTT_*) and the device secret never reach firmware code (STRIDE I4).
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("MQTT_") and k != "DEVICE_SECRET"}
+        env["PYTHONUNBUFFERED"] = "1"
         if self.state_dir is not None:
             Path(self.state_dir).mkdir(parents=True, exist_ok=True)
             env["FIRMWARE_STATE_DIR"] = str(self.state_dir)

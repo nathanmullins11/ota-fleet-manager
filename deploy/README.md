@@ -4,12 +4,18 @@ This folder holds the Docker Compose setup for the OTA Fleet Manager control pla
 
 | Service | What it is | Port |
 |---|---|---|
-| `mosquitto` | MQTT broker (Eclipse Mosquitto 2, configured by `mqtt/mosquitto.conf`) | 1883 |
+| `mosquitto` | MQTT broker (Eclipse Mosquitto 2, configured by `mqtt/mosquitto.conf` and `mqtt/acl`) | 8883 (TLS) |
 | `postgres` | Device registry (PostgreSQL 16, schema loaded from `registries/postgres/init.sql`) | 5432 (localhost only) |
 | `software-registry` | Serves versioned firmware packages (FastAPI) | 8080 |
 | `orchestrator` | Listens for device heartbeats over MQTT and records them in `postgres` | none |
 
-Grafana (the dashboard) runs in the same Compose file, on port 3000. The broker accepts anonymous, unencrypted connections for now; TLS and per-device credentials arrive in Iteration 3. Until then, limit port 1883 on the cloud VM to known IP addresses.
+Grafana (the dashboard) runs in the same Compose file, on port 3000. The broker accepts only TLS connections on 8883, and every client signs in with its own account (FR-7, NF-3):
+
+- **`orchestrator`** reads every device's heartbeats and events and is the only client that writes commands.
+- **`device-NNN`** writes only its own heartbeat and events topics and reads only its own commands (`mqtt/acl`). Its password is derived from `DEVICE_SECRET` and its ID, so the launcher can give each device its own password without a list.
+- **`ops`** may use every topic: the demo's listener and test messages, and admin tooling.
+
+Messages larger than 64 KB are refused. Port 1883 (plain MQTT) is closed.
 
 ## Prerequisites
 
@@ -19,21 +25,32 @@ Grafana (the dashboard) runs in the same Compose file, on port 3000. The broker 
 ## Start
 
 ```bash
-cp .env.example .env          # then edit POSTGRES_PASSWORD
+cp .env.example .env          # then set every "change-me" value
+python ../tools/mqtt_security.py setup        # broker certificates and password file (once)
 docker compose up -d --build
 docker compose ps             # mosquitto, postgres, and software-registry should show "healthy"; orchestrator has no health label
 ```
 
-The first build downloads base images, so it takes a minute. If `.env` is missing or the password is empty, Compose stops with an error message on purpose.
+The first build downloads base images, so it takes a minute. If `.env` is missing or a password is empty, Compose stops with an error message on purpose.
+
+`tools/mqtt_security.py setup` (needs `pip install -r ../tools/requirements.txt`) reads `DEVICE_SECRET`, `MQTT_ORCHESTRATOR_PASSWORD` and `MQTT_OPS_PASSWORD` from `.env` and writes into `mqtt/generated/` (git-ignored):
+
+- `ca.crt` and `ca.key`: the project's own certificate authority. Every client gets `ca.crt` to verify the broker; `ca.key` stays here.
+- `broker.crt` and `broker.key`: the broker's certificate, valid for `mosquitto`, `localhost`, `host.docker.internal` and `127.0.0.1`. Add `--host <public IP>` on the cloud VM.
+- `passwords`: the broker's password file (device-001 to device-100, `orchestrator`, `ops`; `--devices N` for more).
+- `device.env`: `DEVICE_SECRET` and `MQTT_OPS_PASSWORD`, for the computer that launches the devices.
+
+Running it again keeps the certificates, so clients keep trusting them; only a new `--host` reissues the broker certificate. Rerun it, then `docker compose restart mosquitto`, after changing a password in `.env`.
 
 ## Test the broker
 
 ```bash
 docker compose logs orchestrator | grep "Connected to broker"
-docker compose exec mosquitto mosquitto_sub -t 'ota/devices/+/heartbeat' -v
+docker compose exec mosquitto sh -c 'mosquitto_sub -p 8883 --cafile /mosquitto/security/ca.crt \
+    -u ops -P "$MQTT_OPS_PASSWORD" -t "ota/devices/+/heartbeat" -v'
 ```
 
-Expected: the orchestrator logged `Connected to broker mosquitto:1883`. The second command waits and prints each heartbeat as it arrives (Ctrl+C to stop).
+Expected: the orchestrator logged `Connected to broker mosquitto:8883 (TLS, signed in as orchestrator)`. The second command waits and prints each heartbeat as it arrives (Ctrl+C to stop).
 
 ## Test the software registry
 
@@ -223,7 +240,10 @@ docker compose down -v         # stop AND delete the database volume (fresh star
 |---|---|
 | `Set POSTGRES_PASSWORD in deploy/.env` | Create `.env` from `.env.example` and set a password |
 | Port 5432 already in use | Another PostgreSQL is running locally. Change the mapping to `127.0.0.1:5433:5432` in `docker-compose.yml` |
-| Port 1883 already in use | Another MQTT broker is running locally. Stop it, or change the mapping to `1884:1883` and set `MQTT_PORT=1884` for the devices |
+| Port 8883 already in use | Another MQTT broker is running locally. Stop it, or change the mapping to `8884:8883` and set `MQTT_PORT=8884` for the devices |
+| mosquitto exits: `Unable to load CA certificates` or `password file` | Run `python ../tools/mqtt_security.py setup` first (it writes `mqtt/generated/`) |
+| Client log: `Not authorized` or `Bad user name or password` | Wrong or missing password; for a device, `DEVICE_SECRET` differs from the one the password file was made with |
+| Client log: `certificate verify failed` | The client has an old `ca.crt`, or connects with a name not in the broker certificate (rerun setup with `--host`) |
 | Port 8080 already in use | Change the mapping to `8081:8080` and use that port in the `curl` commands |
 | Schema changes not showing up | The init script only runs on a new volume. Run `docker compose down -v`, then `up -d` |
 | Service shows `unhealthy` | `docker compose logs <service>`, for example `docker compose logs mosquitto` |

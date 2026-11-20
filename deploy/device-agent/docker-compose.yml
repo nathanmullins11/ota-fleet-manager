@@ -1,11 +1,15 @@
 # Simulated devices. These run on the local computer and connect to the broker over MQTT,
 # separately from the control-plane stack.
 #
-#   cp .env.example .env     (set MQTT_HOST to the broker's address)
+#   cp .env.example .env     (set MQTT_HOST, and DEVICE_001_PASSWORD from
+#                             python tools/mqtt_security.py device-password device-001)
 #   docker compose up -d --build
 #
-# To add a device, copy the device-001 block, change the service name and DEVICE_ID
-# (each ID must be unique, and must look like device-NNN).
+# The broker accepts only TLS on 8883: each device verifies it with the control plane's CA
+# certificate (MQTT_CA_FILE) and signs in with its own password.
+# To add a device, copy the device-001 block, change the service name, DEVICE_ID and password
+# variable (each ID must be unique, and must look like device-NNN). For many devices,
+# ./fleet.sh derives the passwords itself.
 
 name: ota-fleet-devices
 
@@ -15,9 +19,12 @@ x-device: &device
   extra_hosts:
     # Lets a container reach services published on the host machine (Linux, WSL, Docker Desktop).
     - "host.docker.internal:host-gateway"
+  volumes:
+    - ${MQTT_CA_FILE:-../mqtt/generated/ca.crt}:/run/ota/ca.crt:ro
   environment: &device-env
     MQTT_HOST: ${MQTT_HOST:-host.docker.internal}
-    MQTT_PORT: ${MQTT_PORT:-1883}
+    MQTT_PORT: ${MQTT_PORT:-8883}
+    MQTT_CA_CERT: /run/ota/ca.crt
     HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-5}
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
@@ -27,3 +34,4 @@ services:
     environment:
       <<: *device-env
       DEVICE_ID: device-001
+      MQTT_PASSWORD: ${DEVICE_001_PASSWORD:?set DEVICE_001_PASSWORD in .env (tools/mqtt_security.py device-password device-001)}

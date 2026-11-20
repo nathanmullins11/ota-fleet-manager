@@ -43,12 +43,16 @@ start_control_plane() {
         ok "Created deploy/.env with a random database password."
     fi
 
-    # Dashboard passwords: added once if .env does not have them.
-    local name
-    for name in GRAFANA_ADMIN_PASSWORD GRAFANA_DB_PASSWORD; do
-        if ! grep -q "^$name=" "$ENV_FILE"; then
+    # Dashboard and broker passwords, and the device secret: random values, set once. A
+    # placeholder copied from .env.example ("change-me") is replaced too.
+    local name value
+    for name in GRAFANA_ADMIN_PASSWORD GRAFANA_DB_PASSWORD MQTT_ORCHESTRATOR_PASSWORD \
+                MQTT_OPS_PASSWORD DEVICE_SECRET; do
+        value=$(grep "^$name=" "$ENV_FILE" | tail -n 1 | cut -d= -f2-)
+        if [[ -z "$value" || "$value" == change-me ]]; then
+            sed -i "/^$name=/d" "$ENV_FILE"
             printf '%s=%s\n' "$name" "$(head -c 18 /dev/urandom | base64 | tr -d '/+=')" >>"$ENV_FILE"
-            ok "Added a random $name to deploy/.env"
+            ok "Set a random $name in deploy/.env"
         fi
     done
 
@@ -80,6 +84,17 @@ start_control_plane() {
         cp_compose down -v --remove-orphans 2>&1 | tail -n 2 | indent
     fi
 
+    # Broker TLS certificates (valid for this VM's public IP) and the broker's password file.
+    say "Creating the broker's TLS certificates and passwords..."
+    docker build -q -t "$TOOLS_IMAGE" -f "$DEMO_DIR/lib/tools.Dockerfile" "$REPO_ROOT/tools" >/dev/null \
+        || die "Could not build the tools image."
+    local vm_ip
+    vm_ip=$(public_ip)
+    # shellcheck source=/dev/null
+    (set -a; source "$ENV_FILE"; set +a
+     security_setup "$REPO_ROOT/deploy/mqtt/generated" ${vm_ip:+--host "$vm_ip"}) | indent \
+        || die "Broker security setup failed."
+
     # Database first, so migrations run before the orchestrator writes to it.
     say "Starting the database and applying migrations..."
     cp_compose up -d --wait --quiet-pull postgres >/dev/null 2>&1 || die "PostgreSQL did not start."
@@ -95,8 +110,11 @@ start_control_plane() {
     local ip
     ip=$(public_ip)
     echo
-    say "On your computer, from the repository root, run:"
-    printf '\n      %sdemo/cloud/devices.sh %s%s\n\n' "$BOLD" "${ip:-<vm-ip>}" "$RESET"
+    say "On your computer, from the repository root, copy the broker CA and device secret once"
+    say "(again only if they change), then start the devices:"
+    printf '\n      %sscp ubuntu@%s:%s/deploy/mqtt/generated/{ca.crt,device.env} demo/cloud/%s\n' \
+        "$BOLD" "${ip:-<vm-ip>}" "$(basename "$REPO_ROOT")" "$RESET"
+    printf '      %sdemo/cloud/devices.sh %s%s\n\n' "$BOLD" "${ip:-<vm-ip>}" "$RESET"
     printf '   Dashboard: %shttp://%s:3000%s  (view without login; admin password in deploy/.env)\n' \
         "$BOLD" "${ip:-<vm-ip>}" "$RESET"
     info "The live view starts in a moment. Ctrl+C leaves it; the control plane keeps running."

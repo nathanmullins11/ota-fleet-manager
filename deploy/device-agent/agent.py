@@ -200,12 +200,18 @@ def build_client(cfg: Config, connected: threading.Event,
                  on_command: Callable[[bytes], None]) -> mqtt.Client:
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=cfg.device_id)
     client.reconnect_delay_set(min_delay=1, max_delay=30)
+    if cfg.mqtt_password:
+        client.username_pw_set(cfg.mqtt_username, cfg.mqtt_password)
+    if cfg.mqtt_ca_cert:
+        # TLS, verifying the broker's certificate (and its host name) against our CA.
+        client.tls_set(ca_certs=cfg.mqtt_ca_cert)
 
     def on_connect(client, userdata, flags, reason_code, properties):
         if reason_code.is_failure:
             log.error("Broker refused the connection: %s", reason_code)
             return
-        log.info("Connected to broker %s:%s as %s", cfg.mqtt_host, cfg.mqtt_port, cfg.device_id)
+        log.info("Connected to broker %s:%s as %s (%s)", cfg.mqtt_host, cfg.mqtt_port,
+                 cfg.device_id, "TLS" if cfg.mqtt_ca_cert else "plain text")
         client.subscribe(command_topic(cfg.device_id), qos=1)   # restored after any reconnect
         connected.set()
 
