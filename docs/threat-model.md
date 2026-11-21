@@ -1,12 +1,12 @@
 # OTA Fleet Manager — STRIDE Threat Model
 
-As of 2026-11-16. Tests: `tests/security/` (`pytest -m security`).
+As of 2026-11-21. Tests: `tests/security/` (`pytest -m security`).
 
-Signed firmware holds up well: no test could get unsigned or altered firmware onto a device. The broker is the weak point. Anyone who can reach it can command any device, or fake the health reports that trigger an automatic fleet rollback. And three device-side gaps let a forged command do real damage even through the signature checks.
+Signed firmware holds up well: no test could get unsigned or altered firmware onto a device. The broker is the weak point. Anyone who can reach it can command any device, or fake the health reports that trigger an automatic fleet rollback. And three device-side gaps let a forged command do real damage even through the signature checks. Losing the network partway through an update never leaves a device half-installed, but it can lose commands and results, and one device's outage can roll back every device updated so far.
 
 ## Scope
 
-This models `main` at commit `7132ff6` (Iteration 2, PR #44): the control plane on the AWS VM, the device agent and its firmware, and the release tool. The dashboard branch and the MQTT bridge prototype are out of scope.
+This models `main` at commit `67e4f94` (PR #49, broker TLS and authentication; first written for `7132ff6`, Iteration 2): the control plane on the AWS VM, the device agent and its firmware, and the release tool. The dashboard branch and the MQTT bridge prototype are out of scope.
 
 **Assets**, most valuable first:
 
@@ -62,7 +62,7 @@ flowchart TB
 
 ## Threats by STRIDE category
 
-Twenty-five threats: 16 are mitigated, 2 are mitigated in part, 5 are open, and 2 are accepted. The Iteration 3 broker TLS and authentication work closed S1, S2, R3, I3, I4 and D5 and limited D2. Risk is likelihood times impact for this deployment (a course project on a VM limited to team IPs). It would be higher on an open network.
+Thirty-one threats: 18 are mitigated, 2 are mitigated in part, 9 are open, and 2 are accepted. This table lists 25; the six about losing the network (D7 to D12) have their own section below it. The Iteration 3 broker TLS and authentication work closed S1, S2, R3, I3, I4 and D5 and limited D2. Risk is likelihood times impact for this deployment (a course project on a VM limited to team IPs). It would be higher on an open network.
 
 | ID | Threat | Where | Mitigation today | Status | Risk | Test |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -92,6 +92,21 @@ Twenty-five threats: 16 are mitigated, 2 are mitigated in part, 5 are open, and 
 | E1 | Orchestrator and registry containers run as root | Containers | Device agent already runs as `agent` | Open | Low | `test_E1_*` (2 tests, 3 cases) |
 | E2 | Firmware runs as the agent's user, so it can rewrite the agent's firmware store and talk to the broker | Device agent | Agent code and release key are root-owned | Mitigated in part | Medium | `test_T2_device_code_and_release_key_are_read_only_for_the_agent`, T3 |
 
+## Network loss at critical stages
+
+Losing the network never leaves a device half-updated. A device installs only after a complete, verified download, and the install itself is atomic. What breaks is coordination. Both services connect with clean MQTT sessions, so the broker discards any command or result sent while one side is offline. And with the default limits, one device's outage halts the rollout and rolls back every device updated so far: the whole fleet, unless the rollout runs in stages (`--stages`).
+
+| ID | Stage | Link lost when | What happens today | Status | Risk | Test |
+| --- | --- | --- | --- | --- | --- | --- |
+| D7 | Command delivery | The device is offline as a command is sent | The broker discards the command. A missed update shows as "not reached" and is never retried. A missed rollback leaves the device on the version being rolled back. | Open | Medium | `test_D7_*` (2 tests) |
+| D8 | Download | The transfer drops, is cut short or stalls | Fails safe: `update_failed` and the old firmware keeps running. Nothing is half-installed, and a stall ends at the download timeout. | Mitigated | Low | `test_D8_*` (3 tests, 6 cases) |
+| D9 | Download | A brief outage hits one device | Reported as `update_failed`, with no retry. Under the default limit of 0 failed devices, the rollout halts and rolls back. | Open | Medium | `test_D9_*` (2 tests) |
+| D10 | Install | Power or the link is lost mid-install | Only a staging folder is left behind. The device boots the previous version, and the next install replaces the leftover. | Mitigated | Low | `test_D10_install_cut_short_leaves_previous_version_bootable` |
+| D11 | Result report | The orchestrator is disconnected when a device reports | The result is lost, so the device counts as `no_reply` (failed) and the rollout halts. A result that does arrive late still corrects the record. | Open | Medium | `test_D11_*` (2 tests) |
+| D12 | Health window | An updated device loses its link | After 45 s of silence it's "unresponsive", the same verdict a bricked device gets. The rollout halts and rolls back, but the silent device misses its own rollback (D7). | Open | Medium | `test_D12_*` (1 test) |
+
+A cut-short download is reported as "package size does not match manifest", the same wording a tampered package gets. Reports should tell network failures apart from failed verification (FR-10), or a dropped link looks like an attack. Staged rollouts limit the damage of a false halt to the current stage, but don't prevent it.
+
 ## Highest risks
 
 The broker came first: the Iteration 3 TLS and authentication work closed or limited seven threats (S1, S2, R3, I3, I4, D2, D5). Items 1 and 5 are kept below as a record of what it fixed; items 2 to 4 are still open.
@@ -109,7 +124,7 @@ The broker came first: the Iteration 3 TLS and authentication work closed or lim
 
 ## Security tests
 
-71 tests in `tests/security/` check these threats: 65 pass, and 6 fail on purpose because they describe open threats. CI already runs them with the unit and component tests; `pytest -m security` runs them alone in about 5 seconds.
+85 tests in `tests/security/` check these threats: 76 pass, and 9 fail on purpose because they describe open threats. CI already runs them with the unit and component tests; `pytest -m security` runs them alone in about 12 seconds.
 
 Each open threat has a test marked `open_gap("ID", reason)`, which is pytest's `xfail(strict=True)`. CI passes while the threat is open, and the test fails as soon as someone fixes it. Removing the marker then turns it into a regression test, so this list keeps itself up to date.
 
@@ -117,6 +132,7 @@ Each open threat has a test marked `open_gap("ID", reason)`, which is pytest's `
 | --- | --- | --- | --- | --- |
 | `test_stride_static.py` | unit | Command and message parsers, the installer with hand-built signed packages (path traversal, links, bad entry points), `mosquitto.conf`, Dockerfiles, Compose ports, `.gitignore`, the schema, and every tracked file for private keys | 59 | 3: R2, E1 (orchestrator and registry) |
 | `test_stride_device.py` | component | A real device agent running real firmware, against the genuine registry and an attacker's web server | 6 | 3: T3, T4, S4 |
+| `test_network_loss.py` | component and unit | A real device whose registry drops, cuts short or stalls the download, or loses power mid-install; the orchestrator's MQTT sessions and its rules for silent and failed devices | 11 | 3: D7, D9, D11 |
 
 The device tests show the three open device-side threats happen, not just that a defence is missing:
 
@@ -126,7 +142,7 @@ The device tests show the three open device-side threats happen, not just that a
 
 ## Mitigation plan
 
-Nine changes, in order, close every open threat except the two accepted ones. Changes 1, 5 and 6 are done (Iteration 3 TLS and authentication ticket, FR-7, NF-3), and change 7 in part. The next three are small device-agent changes that could go in a new Iteration 3 ticket. When a change lands, its tests stop failing on purpose: remove their `open_gap` marker.
+Thirteen changes, in order, close every open threat except the two accepted ones. Changes 1, 5 and 6 are done (Iteration 3 TLS and authentication ticket, FR-7, NF-3), and change 7 in part. The next three are small device-agent changes that could go in a new Iteration 3 ticket. Changes 10 to 13 handle network loss and fit the MQTT connection robustness and Health Evaluation and Rollback tickets. When a change lands, its tests stop failing on purpose: remove their `open_gap` marker.
 
 | Order | Change | Closes | Where | Ticket |
 | --- | --- | --- | --- | --- |
@@ -139,5 +155,9 @@ Nine changes, in order, close every open threat except the two accepted ones. Ch
 | 7 (`max_packet_size` done) | `max_packet_size` and connection limits on the broker | D2 | `mosquitto.conf` | Iteration 3: MQTT connection robustness |
 | 8 | `USER` in the orchestrator and registry Dockerfiles | E1 | Dockerfiles | any |
 | 9 | Record the operator (`--operator`, or the login user) in `rollout_events` | R2 | `cli.py`, a migration | any |
+| 10 | Persistent MQTT sessions: devices and the orchestrator turn clean sessions off (or set an MQTT 5 session expiry), and the broker keeps sessions on disk (`persistence true`), so it holds QoS 1 commands and results while a side is offline | D7, D11 | `agent.py`, `main.py`, `mosquitto.conf` | Iteration 3: MQTT connection robustness |
+| 11 | The device retries a failed download with backoff before reporting `update_failed`, and reports network failures separately from failed verification | D9 | `installer.py`, `agent.py` | Iteration 3: MQTT connection robustness |
+| 12 | Reconcile from heartbeats: when a device comes back on the wrong version for its rollout (a missed update or rollback), send its command again | D7, D12 | `rollouts.py` | Iteration 3: Health Evaluation and Rollback |
+| 13 | Team decision: let silence and failed downloads count toward a per-rollout limit, or wait for the device to report back, instead of halting on the first silent or failed device | D9, D12 | `rollout_logic.py`, orchestrator settings | Iteration 3: Health Evaluation and Rollback |
 
 Two threats stay accepted: I5 (firmware isn't secret) and D6 (heartbeat retention matters only at a scale the project won't reach). Revisit D6 if the VM runs for weeks. Also worth considering: a passphrase on the release key (I1), and making CI's `security` tests a required check for merging to `main`.

@@ -69,11 +69,19 @@ def make_package(release, signing_key):
 # --------------------------------------------------------------------------- HTTP servers
 
 class FileServer:
-    """Serves bytes from a dict of path -> bytes; records every request path."""
+    """Serves bytes from a dict of path -> bytes; records every request path.
+
+    faults[path] is a list of network faults, used up one per request to that path:
+      "drop"      close the connection without answering (link lost before the reply)
+      "truncate"  send the full Content-Length but only half the body, then close
+      "stall"     send headers and part of the body, then stop until the server stops
+    """
 
     def __init__(self):
         self.files: dict[str, bytes] = {}
         self.requests: list[str] = []
+        self.faults: dict[str, list[str]] = {}
+        self.stopping = threading.Event()
         server = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -83,9 +91,24 @@ class FileServer:
                 if data is None:
                     self.send_error(404)
                     return
+                queued = server.faults.get(self.path)
+                fault = queued.pop(0) if queued else None
+                if fault == "drop":
+                    self.close_connection = True
+                    return
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
+                if fault == "truncate":
+                    self.wfile.write(data[: len(data) // 2])
+                    self.close_connection = True
+                    return
+                if fault == "stall":
+                    self.wfile.write(data[: len(data) // 4])
+                    self.wfile.flush()
+                    server.stopping.wait(30)
+                    self.close_connection = True
+                    return
                 self.wfile.write(data)
 
             def log_message(self, *args):
@@ -106,6 +129,7 @@ class FileServer:
         self.files[f"{base}/manifest.sig"] = pick(signature, "manifest.sig")
 
     def stop(self):
+        self.stopping.set()
         self.httpd.shutdown()
         self.httpd.server_close()
 
@@ -165,3 +189,10 @@ def command(agent_commands):
         return agent_commands.Command(kind, rollout_id, version, base, f"{base}/manifest",
                                       f"{base}/manifest.sig", sha256)
     return _command
+
+
+@pytest.fixture(scope="session")
+def orch_main():
+    """The orchestrator's main.py (its sibling imports resolve to the orchestrator's own modules)."""
+    from conftest import load_service_module      # tests/conftest.py; this folder is a package
+    return load_service_module("orch", "main")
