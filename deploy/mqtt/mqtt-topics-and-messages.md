@@ -225,6 +225,8 @@ Fields are the same as the update command. `target_version` here is the version 
 
 **Client IDs:** each device uses its device ID as its MQTT client ID (for example `device-001`), and the orchestrator uses `orchestrator`. Two clients with the same ID disconnect each other, so IDs must be unique.
 
+**Persistent sessions:** devices and the orchestrator connect with clean sessions off. While one of them is offline, the broker keeps its subscriptions and queues QoS 1 messages for it: a device gets the commands it missed when it reconnects, and the orchestrator gets the events it missed. The broker keeps sessions on disk (`persistence true`), so a broker restart doesn't lose them, and forgets a client after 7 days away. Heartbeats are QoS 0 and never queued.
+
 **Connection security (FR-7, NF-3):**
 
 - The broker listens only on **8883 with TLS** (1.2 or newer). Clients verify its certificate against the project's CA (`deploy/mqtt/generated/ca.crt`, made by `tools/mqtt_security.py setup`), so a fake broker can't pose as ours.
@@ -245,7 +247,7 @@ Fields are the same as the update command. `target_version` here is the version 
 2. **Heartbeat interval.** Is every 5 seconds acceptable? A shorter interval speeds up failure detection but increases message volume at 50 or more devices.
 3. **Error count meaning.** Errors since the last heartbeat (as written here) or a running total? The orchestrator's threshold logic depends on the answer.
 4. **Commands while busy.** ~~Ignore or queue a command that arrives mid-update?~~ Decided: queue (section 4.4).
-5. **Offline catch-up.** If a device is disconnected when a command is sent, should it get the command on reconnect? This needs a persistent MQTT session. It is not required for Iteration 1 and can wait.
+5. **Offline catch-up.** ~~If a device is disconnected when a command is sent, should it get the command on reconnect?~~ Decided: yes, through persistent sessions (section 5).
 6. **Last will message.** Should the broker announce a device that drops off without a goodbye? Missed heartbeats already cover this, so it is optional.
 
 ## 7. Trying it by hand

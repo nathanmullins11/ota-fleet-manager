@@ -170,7 +170,7 @@ def device(agent, agent_config, installer, firmware_runner, signing_key, package
         heartbeat_interval_seconds=5, log_level="INFO", firmware_dir=tmp_path / "fw",
         factory_dir=factory.parent, public_key_path=tmp_path / "unused.pem",
         start_timeout_seconds=3, restart_delay_seconds=0.2, download_timeout_seconds=3,
-        registry_url=registry.url)
+        registry_url=registry.url, download_attempts=3, download_retry_delay_seconds=0.05)
     events = []
     store = installer.Store(cfg.firmware_dir, signing_key.public_key())
     dev = agent.Device(cfg, store,

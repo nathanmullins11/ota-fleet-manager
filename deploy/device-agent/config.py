@@ -49,6 +49,10 @@ class Config:
     # The software registry. Commands whose download URLs point anywhere else are refused
     # (threat S4). load_config() always sets it; empty (tests only) allows any host.
     registry_url: str = ""
+    # Each file of a package is tried this many times if the network fails, waiting
+    # download_retry_delay_seconds, then twice as long, and so on (threat D9).
+    download_attempts: int = 3
+    download_retry_delay_seconds: float = 1.0
 
 
 def _positive_float(name: str, default: str) -> float:
@@ -69,8 +73,11 @@ def load_config() -> Config:
 
     try:
         port = int(os.environ.get("MQTT_PORT", "1883"))
+        attempts = int(os.environ.get("DOWNLOAD_ATTEMPTS", "3"))
     except ValueError as exc:
         raise SystemExit(f"Invalid numeric setting: {exc}") from None
+    if not 1 <= attempts <= 10:
+        raise SystemExit("DOWNLOAD_ATTEMPTS must be from 1 to 10")
 
     mqtt_host = os.environ.get("MQTT_HOST", "localhost")
     # The registry runs on the control-plane host next to the broker, on port 8080
@@ -95,4 +102,6 @@ def load_config() -> Config:
         mqtt_password=os.environ.get("MQTT_PASSWORD", ""),
         mqtt_ca_cert=os.environ.get("MQTT_CA_CERT", ""),
         registry_url=registry_url.rstrip("/"),
+        download_attempts=attempts,
+        download_retry_delay_seconds=_positive_float("DOWNLOAD_RETRY_DELAY_SECONDS", "1"),
     )

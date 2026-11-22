@@ -254,6 +254,7 @@ def test_I4_firmware_does_not_inherit_agent_secrets(firmware_runner, monkeypatch
 class FakeResponse:
     def __init__(self, size):
         self.size = size
+        self.headers = {"Content-Length": str(size)}
 
     def read(self, n):
         return b"x" * min(n, self.size)

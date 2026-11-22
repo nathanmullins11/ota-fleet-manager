@@ -192,7 +192,9 @@ class Device:
         log.info("Downloading %s from %s", version, cmd.download_url)
         download = download_verified(cmd.manifest_url, cmd.signature_url, cmd.download_url,
                                      self.store.public_key, version, cmd.sha256,
-                                     self.cfg.download_timeout_seconds, report)
+                                     self.cfg.download_timeout_seconds, report,
+                                     self.cfg.download_attempts,
+                                     self.cfg.download_retry_delay_seconds)
         return self.store.add(version, download)
 
     def _switch_to(self, new: Installed, rollback: bool = False) -> Optional[str]:
@@ -240,7 +242,11 @@ class Device:
 
 def build_client(cfg: Config, connected: threading.Event,
                  on_command: Callable[[bytes], None]) -> mqtt.Client:
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=cfg.device_id)
+    # A persistent session (threat D7): while the device is offline the broker keeps its
+    # subscription and queues QoS 1 commands for it, so a missed update or rollback arrives
+    # when it reconnects. Commands are idempotent, so a redelivered one is harmless.
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=cfg.device_id,
+                         clean_session=False)
     client.reconnect_delay_set(min_delay=1, max_delay=30)
     if cfg.mqtt_password:
         client.username_pw_set(cfg.mqtt_username, cfg.mqtt_password)

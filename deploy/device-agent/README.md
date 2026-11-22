@@ -49,6 +49,8 @@ docker compose exec postgres psql -U ota -d ota -c "SELECT * FROM fleet_overview
 | `FIRMWARE_START_TIMEOUT_SECONDS` | `5` | New firmware must report a healthy status within this time, or the update fails and the old version is restarted |
 | `FIRMWARE_RESTART_DELAY_SECONDS` | `2` | Wait before restarting firmware that crashed |
 | `DOWNLOAD_TIMEOUT_SECONDS` | `15` | Per file, when downloading a package |
+| `DOWNLOAD_ATTEMPTS` | `3` | Tries per file when the network fails (dropped or cut-short connection, timeout, HTTP 5xx), so a brief outage does not fail the update. A failed check is never retried |
+| `DOWNLOAD_RETRY_DELAY_SECONDS` | `1` | Wait before the first retry; doubles for each one after it |
 | `FIRMWARE_DIR` | `~/firmware` | Installed versions and `state.json` |
 
 The firmware's own settings (`FIRMWARE_TICK_SECONDS`, `FIRMWARE_FAULT_*`, see `firmware/README.md`) are passed through to it. The broker settings (`MQTT_*`) and `DEVICE_SECRET` are not: firmware never sees the device's credentials. The version a device runs is no longer a setting: it is whatever is installed, starting with the factory firmware 1.0.

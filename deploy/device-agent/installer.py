@@ -21,12 +21,14 @@ verify_package() matches tools/release.py's reference implementation (a test che
 """
 import base64
 import hashlib
+import http.client
 import io
 import json
 import logging
 import os
 import shutil
 import tarfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -57,6 +59,14 @@ class VerificationError(Exception):
 
 class InstallError(Exception):
     """A package could not be downloaded or installed. The message is the event reason."""
+
+
+class DownloadError(InstallError):
+    """A download failed on the network, not a check: worth trying again if `retryable`."""
+
+    def __init__(self, message: str, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 # --------------------------------------------------------------------------- verification
@@ -141,17 +151,48 @@ def verify_package(*, manifest: bytes, signature: bytes, package: bytes,
 # --------------------------------------------------------------------------- downloads
 
 def fetch(url: str, timeout: float, max_bytes: int = MAX_DOWNLOAD_BYTES) -> bytes:
+    """GET a file. Network problems raise DownloadError, so they are never mistaken for a
+    failed check; a connection that closes early is one of them (threat D8)."""
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             data = resp.read(max_bytes + 1)
+            expected = resp.headers.get("Content-Length")
     except urllib.error.HTTPError as exc:
-        raise InstallError(f"download failed: {url} returned HTTP {exc.code}") from exc
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        reason = getattr(exc, "reason", exc)
-        raise InstallError(f"download failed: {url}: {reason}") from exc
+        # 4xx other than timeouts and rate limits will not change on a retry.
+        retryable = exc.code >= 500 or exc.code in (408, 429)
+        raise DownloadError(f"download failed: {url} returned HTTP {exc.code}",
+                            retryable) from exc
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as exc:
+        reason = getattr(exc, "reason", None) or exc
+        raise DownloadError(f"download failed: {url}: {str(reason) or type(reason).__name__}"
+                            ) from exc
     if len(data) > max_bytes:
-        raise InstallError(f"download failed: {url} is larger than {max_bytes} bytes")
+        raise DownloadError(f"download failed: {url} is larger than {max_bytes} bytes",
+                            retryable=False)
+    if expected is not None and expected.isdigit() and len(data) < int(expected):
+        raise DownloadError(f"download failed: {url}: connection closed after {len(data)} "
+                            f"of {expected} bytes")
     return data
+
+
+def fetch_with_retry(url: str, timeout: float, attempts: int = 1, retry_delay: float = 1.0,
+                     report: Report = None) -> bytes:
+    """fetch(), trying a network failure again up to `attempts` times in all, waiting
+    retry_delay, then twice as long, and so on (threat D9: a brief outage is not a failed
+    update)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return fetch(url, timeout)
+        except DownloadError as exc:
+            if not exc.retryable or attempt == attempts:
+                if attempts > 1 and exc.retryable:
+                    raise DownloadError(f"{exc} (after {attempts} attempts)") from exc
+                raise
+            delay = retry_delay * 2 ** (attempt - 1)
+            if report:
+                report(f"{exc}; trying again in {delay:g}s (attempt {attempt + 1} of {attempts})")
+            time.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 @dataclass(frozen=True)
@@ -163,11 +204,13 @@ class Download:
 
 def download_verified(manifest_url: str, signature_url: str, package_url: str,
                       public_key: Ed25519PublicKey, version: str, sha256: str,
-                      timeout: float, report: Report = None) -> Download:
+                      timeout: float, report: Report = None, attempts: int = 1,
+                      retry_delay: float = 1.0) -> Download:
     """Fetch and verify a package. The manifest is checked before the package is fetched,
-    so a forged or mismatched command never causes the package itself to be downloaded."""
+    so a forged or mismatched command never causes the package itself to be downloaded.
+    Each file is tried up to `attempts` times if the network fails (fetch_with_retry)."""
     def get(url: str, what: str) -> bytes:
-        data = fetch(url, timeout)
+        data = fetch_with_retry(url, timeout, attempts, retry_delay, report)
         if report:
             report(f"downloaded {what} ({len(data)} bytes) from {url}")
         return data
