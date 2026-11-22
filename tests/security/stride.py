@@ -12,6 +12,7 @@ import io
 import json
 import tarfile
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -155,9 +156,10 @@ def attacker():
 # --------------------------------------------------------------------------- a real device
 
 @pytest.fixture
-def device(agent, agent_config, installer, firmware_runner, signing_key, packages, tmp_path,
-           monkeypatch):
-    """agent.Device on factory firmware 1.0, real firmware processes, events collected."""
+def device(agent, agent_config, installer, firmware_runner, signing_key, packages, registry,
+           tmp_path, monkeypatch):
+    """agent.Device on factory firmware 1.0, real firmware processes, events collected.
+    Its configured registry is the `registry` server."""
     monkeypatch.setenv("FIRMWARE_TICK_SECONDS", "0.05")
     factory = tmp_path / "factory" / "1.0"
     factory.mkdir(parents=True)
@@ -167,7 +169,8 @@ def device(agent, agent_config, installer, firmware_runner, signing_key, package
         device_id="device-001", mqtt_host="unused", mqtt_port=1883,
         heartbeat_interval_seconds=5, log_level="INFO", firmware_dir=tmp_path / "fw",
         factory_dir=factory.parent, public_key_path=tmp_path / "unused.pem",
-        start_timeout_seconds=3, restart_delay_seconds=0.2, download_timeout_seconds=3)
+        start_timeout_seconds=3, restart_delay_seconds=0.2, download_timeout_seconds=3,
+        registry_url=registry.url)
     events = []
     store = installer.Store(cfg.firmware_dir, signing_key.public_key())
     dev = agent.Device(cfg, store,
@@ -177,6 +180,12 @@ def device(agent, agent_config, installer, firmware_runner, signing_key, package
     dev.boot()
     yield dev
     dev.runner.stop()
+
+
+def serve_at_registry_address(device, server):
+    """Make `server` answer at the device's registry address: an attacker on the network
+    path (the registry is plain HTTP) or one who has taken over the registry."""
+    device.cfg = replace(device.cfg, registry_url=server.url)
 
 
 @pytest.fixture

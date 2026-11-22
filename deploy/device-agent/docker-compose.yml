@@ -25,6 +25,7 @@ x-device: &device
     MQTT_HOST: ${MQTT_HOST:-host.docker.internal}
     MQTT_PORT: ${MQTT_PORT:-8883}
     MQTT_CA_CERT: /run/ota/ca.crt
+    REGISTRY_URL: ${REGISTRY_URL:-}           # empty: http://<MQTT_HOST>:8080
     HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-5}
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
 

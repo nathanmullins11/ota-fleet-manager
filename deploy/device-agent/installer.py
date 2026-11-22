@@ -14,8 +14,9 @@ into the folder of the version it leaves; a rollback (or any move to an older st
 restores the target's snapshot, so older firmware never reads state written by newer firmware.
 
 Only the current and previous versions are kept, so a rollback can reinstall the previous
-one without downloading it. Every package is verified before it is unpacked and again
-before it is run from disk, with the checks of mqtt-topics-and-messages.md 4.3.
+one without downloading it. Every package is verified before it is unpacked, with the
+checks of mqtt-topics-and-messages.md 4.3, and is verified and unpacked again just before
+it is started (refresh_app), so an edited app/ folder never runs.
 verify_package() matches tools/release.py's reference implementation (a test checks this).
 """
 import base64
@@ -266,22 +267,14 @@ class Store:
         fields = verify_package(manifest=download.manifest, signature=download.signature,
                                 package=download.package, public_key=self.public_key,
                                 expected_version=version, report=report)
-        entrypoint = fields.get("entrypoint", "main.py")
-        if not isinstance(entrypoint, str) or "/" in entrypoint or entrypoint in ("", ".", ".."):
-            raise InstallError(f"manifest entrypoint {entrypoint!r} is not a file name")
-
         staging = self.versions_dir / f".{version}.new"
         shutil.rmtree(staging, ignore_errors=True)
-        (staging / APP_DIR).mkdir(parents=True)
+        staging.mkdir(parents=True)
         try:
-            with tarfile.open(fileobj=io.BytesIO(download.package), mode="r:gz") as tar:
-                tar.extractall(staging / APP_DIR, filter="data")
-        except (tarfile.TarError, OSError, EOFError) as exc:
+            _unpack(download.package, _entrypoint(fields), staging / APP_DIR)
+        except InstallError:
             shutil.rmtree(staging, ignore_errors=True)
-            raise InstallError(f"could not unpack the package: {exc}") from exc
-        if not (staging / APP_DIR / entrypoint).is_file():
-            shutil.rmtree(staging, ignore_errors=True)
-            raise InstallError(f"package has no {entrypoint}")
+            raise
         (staging / MANIFEST_FILE).write_bytes(download.manifest)
         (staging / SIGNATURE_FILE).write_bytes(download.signature)
         (staging / PACKAGE_FILE).write_bytes(download.package)
@@ -296,6 +289,32 @@ class Store:
                 os.replace(final / SNAPSHOT_DIR, staging / SNAPSHOT_DIR)
             shutil.rmtree(final)
         os.replace(staging, final)
+        return self.installed(version)
+
+    def refresh_app(self, version: str, report: Report = None) -> Installed:
+        """Unpack app/ again from the stored package, after verifying it, and return it.
+
+        Called just before a version is started (with no firmware running), so whatever is
+        in the unpacked folder is discarded: firmware runs as the agent's user and could have
+        edited it (threat T3). The package is read once and the same bytes are verified and
+        unpacked. Raises VerificationError, InstallError or OSError.
+        """
+        folder = self.versions_dir / version
+        download = Download((folder / MANIFEST_FILE).read_bytes(),
+                            (folder / SIGNATURE_FILE).read_bytes(),
+                            (folder / PACKAGE_FILE).read_bytes())
+        fields = verify_package(manifest=download.manifest, signature=download.signature,
+                                package=download.package, public_key=self.public_key,
+                                expected_version=version, report=report)
+        fresh = folder / f".{APP_DIR}.new"
+        old = folder / f".{APP_DIR}.old"
+        shutil.rmtree(fresh, ignore_errors=True)
+        _unpack(download.package, _entrypoint(fields), fresh)
+        shutil.rmtree(old, ignore_errors=True)
+        if (folder / APP_DIR).exists():
+            os.replace(folder / APP_DIR, old)
+        os.replace(fresh, folder / APP_DIR)
+        shutil.rmtree(old, ignore_errors=True)
         return self.installed(version)
 
     def installed(self, version: str) -> Installed:
@@ -350,6 +369,27 @@ class Store:
         installed = self.install_from_folder(factory[-1], report)
         self.set_current(installed.version)
         return installed
+
+
+def _entrypoint(fields: dict) -> str:
+    entrypoint = fields.get("entrypoint", "main.py")
+    if not isinstance(entrypoint, str) or "/" in entrypoint or entrypoint in ("", ".", ".."):
+        raise InstallError(f"manifest entrypoint {entrypoint!r} is not a file name")
+    return entrypoint
+
+
+def _unpack(package: bytes, entrypoint: str, dest: Path) -> None:
+    """Unpack a verified package into the new folder `dest`; it must contain `entrypoint`."""
+    dest.mkdir(parents=True)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(package), mode="r:gz") as tar:
+            tar.extractall(dest, filter="data")
+    except (tarfile.TarError, OSError, EOFError) as exc:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise InstallError(f"could not unpack the package: {exc}") from exc
+    if not (dest / entrypoint).is_file():
+        shutil.rmtree(dest, ignore_errors=True)
+        raise InstallError(f"package has no {entrypoint}")
 
 
 def _copy_folder(src: Path, dest: Path) -> None:

@@ -3,6 +3,8 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse
 
 # Same rules as the orchestrator (topics.py, messages.py). Always used with fullmatch()
 # and re.ASCII: no trailing newline, digits 0-9 only.
@@ -10,6 +12,19 @@ DEVICE_ID_RE = re.compile(r"device-\d{3,}", re.ASCII)
 VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)?", re.ASCII)
 
 HERE = Path(__file__).resolve().parent
+
+
+def origin(url: str) -> Optional[tuple]:
+    """(scheme, host, port) of an http(s) URL, with the default port filled in; None if the
+    URL has no usable origin."""
+    try:
+        parsed = urlparse(url)
+        port = parsed.port or {"http": 80, "https": 443}.get(parsed.scheme)
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or port is None:
+        return None
+    return parsed.scheme, parsed.hostname.lower(), port
 
 
 @dataclass(frozen=True)
@@ -31,6 +46,9 @@ class Config:
     mqtt_username: str = ""
     mqtt_password: str = ""
     mqtt_ca_cert: str = ""
+    # The software registry. Commands whose download URLs point anywhere else are refused
+    # (threat S4). load_config() always sets it; empty (tests only) allows any host.
+    registry_url: str = ""
 
 
 def _positive_float(name: str, default: str) -> float:
@@ -54,9 +72,16 @@ def load_config() -> Config:
     except ValueError as exc:
         raise SystemExit(f"Invalid numeric setting: {exc}") from None
 
+    mqtt_host = os.environ.get("MQTT_HOST", "localhost")
+    # The registry runs on the control-plane host next to the broker, on port 8080
+    # (deploy/docker-compose.yml), so that is the default.
+    registry_url = os.environ.get("REGISTRY_URL") or f"http://{mqtt_host}:8080"
+    if origin(registry_url) is None:
+        raise SystemExit(f"REGISTRY_URL must be an http(s) URL (got {registry_url!r})")
+
     return Config(
         device_id=device_id,
-        mqtt_host=os.environ.get("MQTT_HOST", "localhost"),
+        mqtt_host=mqtt_host,
         mqtt_port=port,
         heartbeat_interval_seconds=_positive_float("HEARTBEAT_INTERVAL_SECONDS", "5"),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -69,4 +94,5 @@ def load_config() -> Config:
         mqtt_username=os.environ.get("MQTT_USERNAME", device_id),
         mqtt_password=os.environ.get("MQTT_PASSWORD", ""),
         mqtt_ca_cert=os.environ.get("MQTT_CA_CERT", ""),
+        registry_url=registry_url.rstrip("/"),
     )

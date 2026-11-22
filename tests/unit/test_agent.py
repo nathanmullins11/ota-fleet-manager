@@ -7,7 +7,8 @@ pytestmark = pytest.mark.unit
 @pytest.fixture
 def env(monkeypatch):
     for key in ("DEVICE_ID", "HEARTBEAT_INTERVAL_SECONDS", "MQTT_PORT", "FIRMWARE_DIR",
-                "FIRMWARE_START_TIMEOUT_SECONDS", "MQTT_USERNAME", "MQTT_PASSWORD", "MQTT_CA_CERT"):
+                "FIRMWARE_START_TIMEOUT_SECONDS", "MQTT_USERNAME", "MQTT_PASSWORD", "MQTT_CA_CERT",
+                "MQTT_HOST", "REGISTRY_URL"):
         monkeypatch.delenv(key, raising=False)
 
     def set_env(**values):
@@ -23,6 +24,45 @@ def test_valid_config(agent_config, env, tmp_path):
     assert (cfg.factory_dir / "1.0" / "manifest.json").is_file()
     assert cfg.public_key_path.is_file()
 
+
+def test_registry_defaults_to_port_8080_on_the_broker_host(agent_config, env, tmp_path):
+    """The registry runs next to the broker; the default matches the orchestrator's
+    REGISTRY_PUBLIC_URL default, so local devices accept its download URLs."""
+    env(DEVICE_ID="device-001", FIRMWARE_DIR=str(tmp_path), MQTT_HOST="host.docker.internal")
+    assert agent_config.load_config().registry_url == "http://host.docker.internal:8080"
+
+
+def test_registry_can_be_set(agent_config, env, tmp_path):
+    env(DEVICE_ID="device-001", FIRMWARE_DIR=str(tmp_path), REGISTRY_URL="https://reg.example/")
+    assert agent_config.load_config().registry_url == "https://reg.example"
+
+
+def test_bad_registry_url_exits(agent_config, env):
+    env(DEVICE_ID="device-001", REGISTRY_URL="ftp://reg.example")
+    with pytest.raises(SystemExit, match="REGISTRY_URL"):
+        agent_config.load_config()
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("http://Reg.Example:8080/packages/2.0", ("http", "reg.example", 8080)),
+    ("http://reg.example/x", ("http", "reg.example", 80)),
+    ("https://reg.example", ("https", "reg.example", 443)),
+    ("http://reg.example:99999/", None),
+    ("ftp://reg.example/", None),
+    ("/packages/2.0", None),
+])
+def test_origin(agent_config, url, expected):
+    assert agent_config.origin(url) == expected
+
+
+@pytest.mark.parametrize("older, newer", [("1.0", "2.0"), ("2.0", "2.1"), ("2.9", "2.10"),
+                                          ("2.0", "2.0.1"), ("9.9.9", "10.0")])
+def test_version_order(agent_commands, older, newer):
+    assert agent_commands.version_key(older) < agent_commands.version_key(newer)
+
+
+def test_versions_with_and_without_patch_number_are_equal(agent_commands):
+    assert agent_commands.version_key("2.0") == agent_commands.version_key("2.0.0")
 
 
 def test_broker_sign_in_defaults_to_the_device_id(agent_config, env, tmp_path):

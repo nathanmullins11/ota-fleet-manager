@@ -1,11 +1,12 @@
 """STRIDE threats against a real device: agent.Device, real firmware processes, HTTP servers.
 
-The attacker can publish any command (the broker is anonymous, S1) and can run a web
-server. They do not have the release private key. IDs refer to docs/threat-model.md.
+The attacker can get a command to the device (with stolen orchestrator broker credentials;
+before S1 was fixed, anyone could) and can run a web server. They do not have the release
+private key. IDs refer to docs/threat-model.md.
 """
 import pytest
 
-from .stride import open_gap
+from .stride import serve_at_registry_address
 
 pytestmark = [pytest.mark.component, pytest.mark.security]
 
@@ -24,6 +25,7 @@ def test_T2_package_signed_by_another_key_is_not_installed(device, command, atta
     attacker_key = release.Ed25519PrivateKey.generate()
     out = release.build("2.0", release.FIRMWARE_DIR / "2.0", tmp_path / "evil", attacker_key)
     attacker.publish("2.0", out)
+    serve_at_registry_address(device, attacker)
     device.handle(command(attacker, "update", "2.0"))
     assert outcome(device) == ("update_failed", "signature verification failed")
     assert device.heartbeat()["version"] == "1.0"
@@ -35,6 +37,7 @@ def test_T2_genuine_manifest_replayed_for_another_version_is_refused(device, com
                                                                     packages):
     """Old, genuinely signed files served under a newer version's name."""
     attacker.publish("2.1", packages / "1.0")
+    serve_at_registry_address(device, attacker)
     device.handle(command(attacker, "update", "2.1"))
     assert outcome(device) == ("update_failed", "manifest is for version '1.0', expected '2.1'")
     assert device.heartbeat()["version"] == "1.0"
@@ -42,6 +45,7 @@ def test_T2_genuine_manifest_replayed_for_another_version_is_refused(device, com
 
 def test_T2_genuine_manifest_with_swapped_package_is_refused(device, command, attacker, packages):
     attacker.publish("2.0", packages / "2.0", package=(packages / "2.1" / "firmware.tar.gz").read_bytes())
+    serve_at_registry_address(device, attacker)
     device.handle(command(attacker, "update", "2.0"))
     name, reason = outcome(device)
     assert name == "update_failed" and reason in ("package size does not match manifest",
@@ -61,8 +65,6 @@ def test_T2_edited_package_on_disk_is_not_used_for_rollback(device, command, reg
     assert device.store.verify_local("1.0")["version"] == "1.0"
 
 
-@open_gap("T3", "the unpacked app/ folder is not re-verified before it runs; firmware runs as the "
-                "agent's user and can edit the kept previous version, which then runs on rollback")
 def test_T3_edited_unpacked_firmware_never_runs(device, command, registry, tmp_path):
     device.handle(command(registry, "update", "2.0"))
     marker = tmp_path / "planted-code-ran"
@@ -72,7 +74,17 @@ def test_T3_edited_unpacked_firmware_never_runs(device, command, registry, tmp_p
     assert not marker.exists()
 
 
-@open_gap("T4", "no anti-rollback: a forged 'update' to an older signed version is installed")
+def test_T3_edited_current_firmware_is_replaced_at_start_up(device, tmp_path):
+    """Firmware that edits its own folder does not keep the change across a restart."""
+    marker = tmp_path / "planted-code-ran"
+    main_py = device.store.versions_dir / "1.0" / "app" / "main.py"
+    main_py.write_text(f"open({str(marker)!r}, 'w').write('x')\n" + main_py.read_text())
+    device.runner.stop()
+    device.boot()
+    assert device.runner.version == "1.0"
+    assert not marker.exists()
+
+
 def test_T4_update_command_cannot_downgrade(device, command, registry):
     device.handle(command(registry, "update", "2.0"))
     device.handle(command(registry, "update", "1.0", rollout_id=8))   # forged, not a rollback
@@ -80,13 +92,21 @@ def test_T4_update_command_cannot_downgrade(device, command, registry):
     assert device.runner.version == "2.0"
 
 
+def test_T4_rollback_to_an_older_version_still_works(device, command, registry):
+    device.handle(command(registry, "update", "2.0"))
+    device.handle(command(registry, "rollback", "1.0", rollout_id=7))
+    assert outcome(device) == ("rollback_succeeded", None)
+    assert device.runner.version == "1.0"
+
+
 # ==================================================================== Spoofing / disclosure
 
-@open_gap("S4", "devices download from any host named in a command, not only the registry")
 def test_S4_device_only_contacts_the_registry(device, command, attacker, packages):
     attacker.publish("2.0", packages / "2.0")          # genuine files, attacker's server
     device.handle(command(attacker, "update", "2.0"))
     assert attacker.requests == []
+    name, reason = outcome(device)
+    assert name == "update_failed" and "is not on the registry" in reason
 
 
 # =========================================================================== Denial of service

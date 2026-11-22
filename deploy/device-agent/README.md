@@ -42,6 +42,7 @@ docker compose exec postgres psql -U ota -d ota -c "SELECT * FROM fleet_overview
 | `MQTT_PORT` | `1883` (`8883` in the Compose file and `fleet.sh`) | Broker port |
 | `MQTT_USERNAME` | the device ID | Broker account |
 | `MQTT_PASSWORD` | (none) | This device's broker password, derived from `DEVICE_SECRET` and the device ID by the launcher (`tools/mqtt_security.py device-password`) |
+| `REGISTRY_URL` | `http://<MQTT_HOST>:8080` | The software registry. Commands whose download URLs point at any other host or port are refused, so a forged command cannot send the device elsewhere. Set it if the registry is not on the broker's host at port 8080 |
 | `MQTT_CA_CERT` | (none: plain MQTT) | CA certificate to verify the broker with; set, the agent connects over TLS. The control plane's `deploy/mqtt/generated/ca.crt` |
 | `HEARTBEAT_INTERVAL_SECONDS` | `5` | Time between heartbeats |
 | `LOG_LEVEL` | `INFO` | Use `DEBUG` to log every heartbeat sent |
