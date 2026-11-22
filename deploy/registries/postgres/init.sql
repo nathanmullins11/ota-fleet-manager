@@ -122,6 +122,9 @@ CREATE TABLE rollout_events (
                          'rollback_completed', 'completed', 'device_verdict')),
     stage       INTEGER,
     reason      TEXT,
+    -- Who decided (threat R2): the operator who started or rolled back a rollout (cli.py
+    -- --operator or OTA_OPERATOR), or 'orchestrator' for its own decisions.
+    actor       TEXT DEFAULT 'orchestrator',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

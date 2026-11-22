@@ -10,11 +10,15 @@
   docker compose exec orchestrator python cli.py rollout list
   docker compose exec orchestrator python cli.py rollout rollback ID [--reason TEXT]
 
+Starting and rolling back record the operator (threat R2): --operator NAME, or OTA_OPERATOR,
+for example  docker compose exec -e OTA_OPERATOR=$USER orchestrator python cli.py ...
+
 The CLI only records requests in the database. The running orchestrator sends the
 commands (within about a second) and records what the devices report, so the
 orchestrator stays the single component that publishes commands and makes decisions.
 """
 import argparse
+import os
 import sys
 import time
 
@@ -83,7 +87,7 @@ def cmd_start(cfg, store, args) -> int:
         max_errors=args.max_errors, max_failed_devices=args.max_failed,
         unresponsive_seconds=args.unresponsive)
     rid = store.create_rollout(args.version, plan, origin="manual", limits=limits,
-                               stages=args.stages)
+                               stages=args.stages, actor=operator(args))
     stages = assign_stages(plan.to_command, stage_sizes(args.stages, len(plan.to_command)))
 
     print(f"Rollout {rid} created: update to {args.version}, rollback version "
@@ -100,6 +104,18 @@ def cmd_start(cfg, store, args) -> int:
     print(f"\nThe orchestrator sends the commands now. Follow it with:\n"
           f"  python cli.py rollout status {rid} --watch")
     return 0
+
+
+def operator(args) -> str:
+    """Who is running the command: --operator, else OTA_OPERATOR, else 'unnamed operator'."""
+    name = (args.operator or os.environ.get("OTA_OPERATOR") or "").strip()
+    if not name:
+        print("Note: no --operator or OTA_OPERATOR; recorded as 'unnamed operator'.",
+              file=sys.stderr)
+        return "unnamed operator"
+    if len(name) > 64 or not name.isprintable():
+        raise RolloutError("--operator must be at most 64 printable characters")
+    return name
 
 
 def _latest_id(store) -> int:
@@ -127,8 +143,8 @@ def _print_status(store, rid: int) -> str:
            [(d, stage, s, v, st, verdict or ("watching" if s == "updated" else ""), _time(t))
             for d, stage, s, v, st, verdict, _reason, t in store.device_details(rid)])
     print()
-    _table(["time", "decision", "reason"],
-           [(_time(t), e, reason) for t, e, reason in store.events(rid)])
+    _table(["time", "decision", "by", "reason"],
+           [(_time(t), e, actor or "", reason) for t, e, reason, actor in store.events(rid)])
     return r["state"]
 
 
@@ -153,7 +169,7 @@ def cmd_list(cfg, store, args) -> int:
 
 
 def cmd_rollback(cfg, store, args) -> int:
-    store.request_rollback(args.id, args.reason)
+    store.request_rollback(args.id, args.reason, actor=operator(args))
     r = store.rollout(args.id)
     print(f"Rollback of rollout {args.id} requested: devices go back to {r['rollback_version']}.")
     print(f"Follow it with:\n  python cli.py rollout status {args.id} --watch")
@@ -194,6 +210,7 @@ def main(argv=None) -> int:
                         help="failed installs allowed before the rollout halts")
     health.add_argument("--unresponsive", type=int, metavar="S",
                         help="seconds of silence after updating that count as unresponsive")
+    p.add_argument("--operator", metavar="NAME", help="who is starting it (default: OTA_OPERATOR)")
     p.set_defaults(func=cmd_start)
 
     p = rsub.add_parser("status", help="show a rollout (default: the latest)")
@@ -206,6 +223,7 @@ def main(argv=None) -> int:
     p = rsub.add_parser("rollback", help="roll a rollout's devices back")
     p.add_argument("id", type=int)
     p.add_argument("--reason", default="manual rollback requested by operator")
+    p.add_argument("--operator", metavar="NAME", help="who is asking (default: OTA_OPERATOR)")
     p.set_defaults(func=cmd_rollback)
 
     args = parser.parse_args(argv)

@@ -119,17 +119,17 @@ class RolloutStore:
 
     def events(self, rollout_id: int) -> list[tuple]:
         return self.db.run(lambda conn: conn.execute(
-            "SELECT created_at, event, reason FROM rollout_events "
+            "SELECT created_at, event, reason, actor FROM rollout_events "
             " WHERE rollout_id = %s ORDER BY id", (rollout_id,)).fetchall())
 
     # ----------------------------------------------------------------- requests (cli.py)
 
     def create_rollout(self, target_version: str, plan: TargetPlan, origin: str,
                        limits: Optional[HealthLimits] = None,
-                       stages: Optional[str] = None) -> int:
+                       stages: Optional[str] = None, actor: str = "orchestrator") -> int:
         """Record a pending rollout, its stages (device-ID order) and the health limits it is
         judged by; the orchestrator sends the commands. stages: e.g. '1,3,6' or
-        '10%,50%,100%'; None for a single stage."""
+        '10%,50%,100%'; None for a single stage. actor: who asked for it (threat R2)."""
         limits = limits or HealthLimits()
         sizes = stage_sizes(stages, len(plan.to_command))
         assignment = assign_stages(plan.to_command, sizes)
@@ -153,13 +153,13 @@ class RolloutStore:
                     conn.execute("INSERT INTO rollout_devices (rollout_id, device_id, stage) "
                                  "VALUES (%s, %s, %s)", (rid, device_id, assignment[device_id]))
                 conn.execute(
-                    "INSERT INTO rollout_events (rollout_id, event, stage, reason) "
-                    "VALUES (%s, 'started', 0, %s)",
-                    (rid, _start_reason(origin, target_version, plan, limits, assignment)))
+                    "INSERT INTO rollout_events (rollout_id, event, stage, reason, actor) "
+                    "VALUES (%s, 'started', 0, %s, %s)",
+                    (rid, _start_reason(origin, target_version, plan, limits, assignment), actor))
                 return rid
         return self.db.run(work)
 
-    def request_rollback(self, rollout_id: int, reason: str) -> None:
+    def request_rollback(self, rollout_id: int, reason: str, actor: str = "orchestrator") -> None:
         def work(conn):
             with conn.transaction():
                 row = conn.execute("SELECT state FROM rollouts WHERE id = %s FOR UPDATE",
@@ -170,8 +170,8 @@ class RolloutStore:
                 # ended_at is cleared: a completed rollout that is rolled back is running again.
                 conn.execute("UPDATE rollouts SET state = 'halted', halt_reason = %s, "
                              "ended_at = NULL WHERE id = %s", (reason, rollout_id))
-                conn.execute("INSERT INTO rollout_events (rollout_id, event, reason) "
-                             "VALUES (%s, 'halted', %s)", (rollout_id, reason))
+                conn.execute("INSERT INTO rollout_events (rollout_id, event, reason, actor) "
+                             "VALUES (%s, 'halted', %s, %s)", (rollout_id, reason, actor))
         self.db.run(work)
 
 
