@@ -21,7 +21,7 @@ def test_still_watching_inside_the_window(rollout_logic, limits):
 
 
 def test_healthy_after_the_window(rollout_logic, limits):
-    verdict, reason = rollout_logic.evaluate_device(device(rollout_logic, since=61, errors=3),
+    verdict, reason = rollout_logic.evaluate_device(device(rollout_logic, since=63, errors=3),
                                                     limits)
     assert verdict == "healthy"
     assert reason == "within limits for 60 s on 2.1: 0 crashes, 3 errors"
@@ -38,7 +38,7 @@ def test_too_many_errors_is_unhealthy(rollout_logic, limits):
 
 
 def test_errors_at_the_limit_are_allowed(rollout_logic, limits):
-    assert rollout_logic.evaluate_device(device(rollout_logic, since=61, errors=10),
+    assert rollout_logic.evaluate_device(device(rollout_logic, since=63, errors=10),
                                          limits)[0] == "healthy"
 
 
@@ -58,11 +58,27 @@ def test_a_short_drop_is_not_unresponsive(rollout_logic, limits):
 
 
 def test_healthy_needs_the_device_to_have_been_heard_from(rollout_logic, limits):
-    """Past the window: healthy if heard from recently; never heard from means keep waiting."""
-    assert rollout_logic.evaluate_device(device(rollout_logic, since=70, silent=30), limits)[0] \
+    """Past the window: healthy once heard from after it; never heard from means keep waiting."""
+    assert rollout_logic.evaluate_device(device(rollout_logic, since=70, silent=4), limits)[0] \
         == "healthy"
     assert rollout_logic.evaluate_device(device(rollout_logic, since=70, silent=None),
                                          limits) is None
+
+
+@pytest.mark.parametrize("since,silent,expected", [
+    (60, 0, "healthy"),          # heartbeat right at the end of the window
+    (65, 5, "healthy"),          # its last heartbeat came at 60 s
+    (60, 40, None),              # went quiet 20 s into the window: not healthy yet
+    (64, 44, None),              # still quiet, still under the 45 s limit
+    (66, 46, "unresponsive"),    # quiet for longer than allowed
+    (70, 15, None),              # last heard at 55 s: the window was not yet over
+])
+def test_a_device_that_goes_quiet_mid_window_is_not_passed_as_healthy(
+        rollout_logic, limits, since, silent, expected):
+    """Feedback: unresponsive_seconds (45) shorter than the window (60) must not let a device
+    that stopped reporting partway through the window be judged healthy at its end."""
+    result = rollout_logic.evaluate_device(device(rollout_logic, since=since, silent=silent), limits)
+    assert (result and result[0]) == expected
 
 
 # --------------------------------------------------------------------------- commands not answered

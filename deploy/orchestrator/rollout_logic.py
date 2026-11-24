@@ -16,7 +16,9 @@ Health evaluation (FR-4, FR-5): each updated device is watched for a health wind
 gets a verdict (rollout_devices.verdict). An unhealthy or unresponsive device, or more
 failed installs than allowed, halts the rollout and rolls it back automatically:
 
-  healthy        stayed within the limits for the whole window, and is still heard from
+  healthy        stayed within the limits for the whole window, proven by a heartbeat
+                 sent after the window ended (a device that went quiet partway through
+                 is watched until it reports again or is unresponsive)
   unhealthy      more crashes or errors than allowed within the window
   unresponsive   updated, then went silent for longer than allowed (boot loop, broken agent)
   failed_update  reported update_failed (download, verification or start failed)
@@ -128,7 +130,15 @@ def evaluate_device(h: DeviceHealth, limits: HealthLimits) -> Optional[tuple[str
     if silent is not None and silent > limits.unresponsive_seconds:
         return "unresponsive", (f"no heartbeat for {silent:.0f} s after updating to {h.version} "
                                 f"(limit {limits.unresponsive_seconds} s)")
-    if h.seconds_since_update >= limits.window_seconds and silent is not None:
+    # Healthy needs a heartbeat from after the window ended: the device lasted the whole
+    # window. Silence alone is judged by unresponsive_seconds above, so a device that goes
+    # quiet partway through (say 20 s into a 60 s window) is never passed as healthy while
+    # its silence is still under the limit; it waits until it reports or times out.
+    # A window of 0 (no health watch) only needs the device to have been heard from.
+    heard_after_window = silent is not None and (
+        limits.window_seconds == 0
+        or h.seconds_since_update - silent >= limits.window_seconds)
+    if heard_after_window:
         crashes = f"{h.crashes} crash" + ("" if h.crashes == 1 else "es")
         return "healthy", (f"within limits for {limits.window_seconds} s on {h.version}: "
                            f"{crashes}, {h.errors} errors")
