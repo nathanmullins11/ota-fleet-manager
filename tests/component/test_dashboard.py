@@ -123,6 +123,36 @@ def test_reader_sees_the_latest_rollout_by_default(reader, sample_data):
     assert rows[0][:4] == ("#1", "ROLLED_BACK", "2.1", "1.0")
 
 
+
+def test_rollout_counters_stay_consistent_after_a_rollback(reader, pg):
+    """Feedback: in a ROLLED_BACK state the counters must still describe the rollout.
+    Fleet exposed counts only devices that were sent the update (not an offline device
+    that was never reached, nor later stages that were skipped), out of the fleet as it
+    was when the rollout started (not devices that registered afterwards)."""
+    pg.execute("INSERT INTO firmware_versions (version, checksum_sha256) VALUES "
+               "('1.0', %s), ('2.1', %s)", ("1" * 64, "2" * 64))
+    pg.execute("INSERT INTO devices (device_id, status, registered_at) "
+               "SELECT 'device-' || lpad(i::text, 3, '0'), 'healthy', now() - interval '1 hour' "
+               "FROM generate_series(1, 10) i")
+    pg.execute("INSERT INTO devices (device_id, status) VALUES ('device-011', 'healthy')")
+    pg.execute("INSERT INTO rollouts (target_version, rollback_version, state, started_at, "
+               "ended_at, stage_count, current_stage) VALUES ('2.1', '1.0', 'rolled_back', "
+               "now() - interval '5 minutes', now(), 3, 2)")
+    rows = ([("device-001", "rolled_back", "healthy")]                       # stage 1 passed
+            + [(f"device-00{i}", "rolled_back", None) for i in (2, 3)]       # stage 2, in window
+            + [("device-004", "rolled_back", "unhealthy")]                   # the crash
+            + [("device-005", "failed", "not_reached")]                      # offline, never sent
+            + [(f"device-{i:03d}", "skipped", None) for i in range(6, 11)])  # stage 3
+    for device_id, state, verdict in rows:
+        pg.execute("INSERT INTO rollout_devices (rollout_id, device_id, state, verdict) "
+                   "VALUES (1, %s, %s, %s)", (device_id, state, verdict))
+    cur = reader.execute(runnable(queries()["Rollout"]))
+    row = dict(zip([c.name for c in cur.description], cur.fetchone(), strict=True))
+    assert row["State"] == "ROLLED_BACK"
+    assert row["Fleet exposed (%)"] == 40          # 4 of the 10 devices there at the start
+    assert row["Passed health window"] == 1
+    assert row["Failed"] == 1
+
 def test_reader_cannot_change_anything(reader, sample_data):
     import psycopg
 

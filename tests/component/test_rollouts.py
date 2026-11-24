@@ -659,6 +659,33 @@ def test_the_next_stage_waits_for_the_health_window(store, logic, pg, runner, cl
     assert sent_to(client) == FLEET[1:4]
 
 
+def test_a_canary_that_goes_quiet_mid_window_does_not_advance_the_stage(
+        store, logic, pg, runner, client, msgs):
+    """Feedback: with unresponsive_seconds (45) shorter than the window (60), a canary that
+    stops reporting 21 s into its window is not passed as healthy when the window ends; it is
+    judged unresponsive once its silence passes 45 s, and the rollout halts in stage 1."""
+    add_devices(pg, *FLEET[:4])
+    rid = start(store, logic, "2.0", limits=strict(logic), stages="1,3")
+    runner.tick()
+    client.take()
+    succeed(runner, msgs, rid, ["device-001"])
+    age_window(pg, rid, 61)
+    pg.execute("UPDATE devices SET last_heartbeat = now() - interval '40 seconds' "
+               "WHERE device_id = 'device-001'")
+    runner.tick()
+    assert client.take() == [] and stage_of(pg, rid) == (1, 2)    # not healthy: still watched
+    assert verdicts(store, rid).get("device-001") is None
+
+    age_window(pg, rid, 67)
+    pg.execute("UPDATE devices SET last_heartbeat = now() - interval '46 seconds' "
+               "WHERE device_id = 'device-001'")
+    runner.tick()
+    assert verdicts(store, rid)["device-001"] == "unresponsive"
+    assert [(d, c["command"]) for d, c, _ in client.take()] == [("device-001", "rollback")]
+    assert store.rollout(rid)["halt_reason"].startswith(
+        "automatic (stage 1 of 2): device-001 unresponsive")
+
+
 def test_a_crashing_canary_stops_the_rollout_there(store, logic, pg, runner, client, msgs):
     """Iteration 3 final test: 2.1 reaches the canary only; the rest never receive it."""
     add_devices(pg, *FLEET)

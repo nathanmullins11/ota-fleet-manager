@@ -9,7 +9,7 @@ Scripted demos of the OTA Update Fleet Manager in two setups:
 
 Each step says what is about to happen and which requirement it covers, does it, and shows the result. By default the script waits for **Enter** before each step so you can talk; `--auto` runs straight through (about 4 minutes).
 
-**Real by default, `--simulate` for a clean run.** By default the demo checks what the devices *really* do: install firmware, report crashes, roll back, refuse forged commands. Anything they do not do is printed in red as **✘ NOT WORKING**, with what was seen instead, and the demo carries on; the summary lists every check. With the device update logic in place, a local run passes every check (91 with 10 devices). `--simulate` keeps the earlier behaviour: the demo fakes the device replies and the crash heartbeat (marked SIMULATED), for presenting before that work lands.
+**Real by default, `--simulate` for a clean run.** By default the demo checks what the devices *really* do: install firmware, report crashes, roll back, refuse forged commands. Anything they do not do is printed in red as **✘ NOT WORKING**, with what was seen instead, and the demo carries on; the summary lists every check. With the device update logic in place, a local run passes every check (97 with 10 devices). `--simulate` keeps the earlier behaviour: the demo fakes the device replies and the crash heartbeat (marked SIMULATED), for presenting before that work lands.
 
 **Watch it live.** The control plane includes the dashboard: open http://localhost:3000 (cloud: `http://<vm-ip>:3000`) next to the terminal to see the fleet, each rollout's health verdicts, the orchestrator's decisions, CPU and memory, and the messages that were rejected as the demo runs. Step 1 checks that it is up and can read the database.
 
@@ -41,6 +41,23 @@ The script exits with status 1 if any check is NOT WORKING, so CI runs it as the
 What the devices are expected to do comes from section 4 of `deploy/mqtt/mqtt-topics-and-messages.md` and from `firmware/README.md`. The demo checks it from the outside, over MQTT (a listener records every heartbeat, event and command), so the same checks run in local and cloud mode. The local demo starts its control plane with a 30 s command timeout, so a rollout whose devices never answer ends quickly instead of blocking the next step.
 
 **Testing a device agent with the demo.** `DEVICE_AGENT_DIR=<folder> demo/local/demo.sh` builds the demo's devices from another folder (for example a work-in-progress agent) instead of `deploy/device-agent/`. When every device-side check passes, the summary says "Everything the demo checks is working".
+
+## What is real and what is staged
+
+Everything the demo checks happens in the running system. What the script stages is the
+**situation**, so each scenario happens on cue in a 5 to 10 minute walkthrough:
+
+| Real, end to end | Staged for the walkthrough |
+|---|---|
+| Devices: one container each, running the real agent and firmware as a child process | Fleet size, and which devices are stopped (`docker stop`) to show offline handling and a stage with an unreachable device |
+| Updates: signed packages downloaded from the registry, verified and installed; rollbacks restore the kept version and its state | The 2.1 fault: the 2.1 firmware is written to log errors after ~10 s and crash after ~15 s (`FIRMWARE_FAULT_*`, firmware/README.md), so a real crash is guaranteed |
+| Health verdicts, halts, stage advances and rollbacks: decided by the orchestrator alone from heartbeats and events, the demo only reads the result | The health window: 20 s instead of the default 60 s, to save time (`HEALTH_WINDOW_SECONDS`) |
+| Broker TLS, sign-in and access rules; message validation; signature checks on the device | Attacks: malformed heartbeats, forged commands, a wrong password, an anonymous or untrusting client are published by the script on purpose |
+| The dashboard: live queries on the same database | Rollouts are started with the CLI by the script (or the operator's key in the cloud view), as an operator would |
+
+`--simulate` is the one mode with mocked behaviour: the demo publishes the replies and the crash
+heartbeat a device would send instead of running real updates. Those steps are titled
+**(SIMULATED)** and the summary says so. It is not used for the presentation or CI.
 
 ## Requirements
 
