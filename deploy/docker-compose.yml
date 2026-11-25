@@ -27,6 +27,8 @@ services:
       - ./mqtt/acl:/mosquitto/config/acl:ro
       # Certificates and the password file: tools/mqtt_security.py setup.
       - ${MQTT_SECURITY_DIR:-./mqtt/generated}:/mosquitto/security:ro
+      # Sessions and messages queued for offline clients (mosquitto.conf, persistence).
+      - mosquitto-data:/mosquitto/data
     healthcheck:
       # Healthy once the broker accepts a signed-in TLS client and serves its uptime topic.
       test: ["CMD-SHELL", "mosquitto_sub -h localhost -p 8883 --cafile /mosquitto/security/ca.crt -u ops -P \"$$MQTT_OPS_PASSWORD\" -t '$$SYS/broker/uptime' -C 1 -W 3"]
@@ -169,5 +171,6 @@ services:
         condition: service_started   # it creates the dashboard's database login
 
 volumes:
+  mosquitto-data:
   pgdata:
   grafana-data:

@@ -106,7 +106,7 @@ def device_states(store, rid):
 
 
 def events(store, rid):
-    return [(e, reason) for _, e, reason in store.events(rid)]
+    return [(e, reason) for _, e, reason, _actor in store.events(rid)]
 
 
 def age_commands(pg, rid, seconds):
@@ -209,6 +209,17 @@ def test_request_rollback_halts_and_reopens(store, logic, pg):
     r = store.rollout(rid)
     assert (r["state"], r["halt_reason"], r["ended_at"]) == ("halted", "operator: bad build", None)
     assert events(store, rid)[-1] == ("halted", "operator: bad build")
+
+
+def test_operator_is_recorded_for_start_and_rollback(store, logic, pg):
+    """Threat R2: the decision log says who started and who rolled back a rollout."""
+    add_devices(pg, "device-001")
+    plan = logic.plan_targets(store.devices(), "2.0", None, None)
+    rid = store.create_rollout("2.0", plan, "manual", lenient(logic), actor="alice")
+    pg.execute("UPDATE rollouts SET state = 'in_progress' WHERE id = %s", (rid,))
+    store.request_rollback(rid, "bad build", actor="bob")
+    assert [(e, actor) for _, e, _reason, actor in store.events(rid)] == [
+        ("started", "alice"), ("halted", "bob")]
 
 
 # --------------------------------------------------------------------------- RolloutRunner: update

@@ -55,6 +55,12 @@ def _absolute_http_url(value) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
+def version_key(version: str) -> tuple:
+    """Sort key for VERSION_RE versions: '2.0' and '2.0.0' compare equal."""
+    parts = [int(p) for p in version.split(".")]
+    return tuple(parts + [0] * (3 - len(parts)))
+
+
 def parse_command(payload: bytes) -> Command:
     try:
         data = json.loads(payload)

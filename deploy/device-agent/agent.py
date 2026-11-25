@@ -10,7 +10,10 @@ command that arrives during an update waits for it to finish. A command for the 
 that is already running changes nothing and is answered with success (idempotent), so a
 repeated or redelivered command is harmless.
 
-Not implemented: TLS and broker authentication.
+Before acting on a command the agent refuses download URLs outside its configured registry
+(threat S4) and an `update` to a version older than the one running (T4: older versions
+are installed only by `rollback`). Every version is verified and unpacked again from its
+signed package just before it starts, so firmware cannot plant code in a kept version (T3).
 """
 import json
 import logging
@@ -22,8 +25,8 @@ from typing import Callable, Optional
 
 import paho.mqtt.client as mqtt
 
-from commands import Command, InvalidCommand, parse_command
-from config import Config, load_config
+from commands import Command, InvalidCommand, parse_command, version_key
+from config import Config, load_config, origin
 from firmware_runner import FirmwareRunner
 from installer import (InstallError, Installed, Store, VerificationError, download_verified,
                        load_public_key)
@@ -98,7 +101,7 @@ class Device:
     def boot(self) -> None:
         installed = self.store.bootable(self.cfg.factory_dir,
                                         report=lambda line: log.info("At start-up: %s", line))
-        self.runner.start(installed.version, installed.app_dir, installed.entrypoint)
+        self._start(installed)
         problem = self.runner.wait_until_started(self.cfg.start_timeout_seconds)
         if problem:
             log.warning("At start-up: %s", problem)
@@ -117,6 +120,13 @@ class Device:
                      version, kind, cmd.rollout_id)
             self.send_event(f"{kind}_succeeded", cmd.rollout_id, version,
                             f"already running {version}")
+            return
+
+        refusal = self.refusal(cmd)
+        if refusal:
+            log.warning("Refused %s to %s (rollout %d): %s", kind, version, cmd.rollout_id,
+                        refusal)
+            self.send_event(f"{kind}_failed", cmd.rollout_id, version, refusal)
             return
 
         self.send_event(f"{kind}_started", cmd.rollout_id, version, None)
@@ -139,6 +149,35 @@ class Device:
             log.info("%s to %s succeeded", kind.capitalize(), version)
             self.send_event(f"{kind}_succeeded", cmd.rollout_id, version, None)
 
+    def refusal(self, cmd: Command) -> Optional[str]:
+        """Why the command must not be carried out, or None. Checked before any download."""
+        if self.cfg.registry_url:
+            registry = origin(self.cfg.registry_url)
+            for url in (cmd.manifest_url, cmd.signature_url, cmd.download_url):
+                if origin(url) != registry:
+                    return (f"download URL {url} is not on the registry "
+                            f"{self.cfg.registry_url}")
+        if (cmd.command == "update" and self.version
+                and version_key(cmd.target_version) < version_key(self.version)):
+            return (f"update to older version {cmd.target_version} refused (running "
+                    f"{self.version}); older versions are installed only by rollback")
+        return None
+
+    def _start(self, installed: Installed, trial: bool = False) -> None:
+        """Start a version from a freshly verified and unpacked copy of its package (T3)."""
+        fresh = self.store.refresh_app(installed.version)
+        self.runner.start(fresh.version, fresh.app_dir, fresh.entrypoint, trial=trial)
+
+    def _restart_old(self, old: Installed) -> None:
+        """Go back to the version that was running; if its package no longer verifies,
+        start whatever the device would boot (previous version, else factory firmware)."""
+        try:
+            self._start(old)
+        except (VerificationError, InstallError, OSError) as exc:
+            log.error("Cannot restart %s (%s); starting the boot version instead",
+                      old.version, exc)
+            self.boot()
+
     def _obtain(self, cmd: Command) -> Installed:
         """A verified, unpacked copy of the target: the kept local copy if it matches the
         command's checksum (normal for a rollback), otherwise a fresh download."""
@@ -153,7 +192,9 @@ class Device:
         log.info("Downloading %s from %s", version, cmd.download_url)
         download = download_verified(cmd.manifest_url, cmd.signature_url, cmd.download_url,
                                      self.store.public_key, version, cmd.sha256,
-                                     self.cfg.download_timeout_seconds, report)
+                                     self.cfg.download_timeout_seconds, report,
+                                     self.cfg.download_attempts,
+                                     self.cfg.download_retry_delay_seconds)
         return self.store.add(version, download)
 
     def _switch_to(self, new: Installed, rollback: bool = False) -> Optional[str]:
@@ -177,12 +218,15 @@ class Device:
                 log.info("Restored the state snapshot of %s (state schema %s)",
                          new.version, new.state_schema)
             elif downgrade:
-                self.runner.start(old.version, old.app_dir, old.entrypoint)
+                self._restart_old(old)
                 return (f"no state snapshot for {new.version}, which cannot read state schema "
                         f"{old.state_schema}; still running {old.version}")
 
-        self.runner.start(new.version, new.app_dir, new.entrypoint, trial=True)
-        problem = self.runner.wait_until_started(self.cfg.start_timeout_seconds)
+        try:
+            self._start(new, trial=True)
+            problem = self.runner.wait_until_started(self.cfg.start_timeout_seconds)
+        except (VerificationError, InstallError, OSError) as exc:
+            problem = f"cannot start {new.version}: {exc}"
         if problem is None:
             self.store.set_current(new.version)
             log.info("Firmware %s reports: %s", new.version, self.runner.latest_line)
@@ -190,7 +234,7 @@ class Device:
         self.runner.stop()
         self.store.restore_state(old.version)     # new firmware may have converted it
         log.info("Restored the state snapshot of %s after the failed start", old.version)
-        self.runner.start(old.version, old.app_dir, old.entrypoint)
+        self._restart_old(old)
         return f"{problem}; still running {old.version}"
 
 
@@ -198,7 +242,11 @@ class Device:
 
 def build_client(cfg: Config, connected: threading.Event,
                  on_command: Callable[[bytes], None]) -> mqtt.Client:
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=cfg.device_id)
+    # A persistent session (threat D7): while the device is offline the broker keeps its
+    # subscription and queues QoS 1 commands for it, so a missed update or rollback arrives
+    # when it reconnects. Commands are idempotent, so a redelivered one is harmless.
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=cfg.device_id,
+                         clean_session=False)
     client.reconnect_delay_set(min_delay=1, max_delay=30)
     if cfg.mqtt_password:
         client.username_pw_set(cfg.mqtt_username, cfg.mqtt_password)
@@ -286,8 +334,8 @@ def main() -> None:
         device.boot()
     except (InstallError, VerificationError, OSError) as exc:
         raise SystemExit(f"Cannot start firmware: {exc}") from None
-    log.info("Starting %s (firmware %s, heartbeat every %ss)",
-             cfg.device_id, device.version, cfg.heartbeat_interval_seconds)
+    log.info("Starting %s (firmware %s, heartbeat every %ss, registry %s)",
+             cfg.device_id, device.version, cfg.heartbeat_interval_seconds, cfg.registry_url)
 
     def work() -> None:
         while not stop.is_set():

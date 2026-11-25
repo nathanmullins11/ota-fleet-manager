@@ -24,7 +24,11 @@ log = logging.getLogger("orchestrator")
 
 
 def build_client(cfg, mqtt_db: Database, on_event) -> mqtt.Client:
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=cfg.mqtt_client_id)
+    # A persistent session (threat D11): while the orchestrator is disconnected the broker
+    # queues device events (QoS 1) for it, so results are not lost and devices that did
+    # report are not counted as failed. A late or repeated event is applied safely.
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=cfg.mqtt_client_id,
+                         clean_session=False)
     client.reconnect_delay_set(min_delay=1, max_delay=30)
     if cfg.mqtt_username:
         client.username_pw_set(cfg.mqtt_username, cfg.mqtt_password)

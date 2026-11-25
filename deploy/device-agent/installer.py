@@ -14,18 +14,21 @@ into the folder of the version it leaves; a rollback (or any move to an older st
 restores the target's snapshot, so older firmware never reads state written by newer firmware.
 
 Only the current and previous versions are kept, so a rollback can reinstall the previous
-one without downloading it. Every package is verified before it is unpacked and again
-before it is run from disk, with the checks of mqtt-topics-and-messages.md 4.3.
+one without downloading it. Every package is verified before it is unpacked, with the
+checks of mqtt-topics-and-messages.md 4.3, and is verified and unpacked again just before
+it is started (refresh_app), so an edited app/ folder never runs.
 verify_package() matches tools/release.py's reference implementation (a test checks this).
 """
 import base64
 import hashlib
+import http.client
 import io
 import json
 import logging
 import os
 import shutil
 import tarfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -56,6 +59,14 @@ class VerificationError(Exception):
 
 class InstallError(Exception):
     """A package could not be downloaded or installed. The message is the event reason."""
+
+
+class DownloadError(InstallError):
+    """A download failed on the network, not a check: worth trying again if `retryable`."""
+
+    def __init__(self, message: str, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 # --------------------------------------------------------------------------- verification
@@ -140,17 +151,48 @@ def verify_package(*, manifest: bytes, signature: bytes, package: bytes,
 # --------------------------------------------------------------------------- downloads
 
 def fetch(url: str, timeout: float, max_bytes: int = MAX_DOWNLOAD_BYTES) -> bytes:
+    """GET a file. Network problems raise DownloadError, so they are never mistaken for a
+    failed check; a connection that closes early is one of them (threat D8)."""
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             data = resp.read(max_bytes + 1)
+            expected = resp.headers.get("Content-Length")
     except urllib.error.HTTPError as exc:
-        raise InstallError(f"download failed: {url} returned HTTP {exc.code}") from exc
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        reason = getattr(exc, "reason", exc)
-        raise InstallError(f"download failed: {url}: {reason}") from exc
+        # 4xx other than timeouts and rate limits will not change on a retry.
+        retryable = exc.code >= 500 or exc.code in (408, 429)
+        raise DownloadError(f"download failed: {url} returned HTTP {exc.code}",
+                            retryable) from exc
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as exc:
+        reason = getattr(exc, "reason", None) or exc
+        raise DownloadError(f"download failed: {url}: {str(reason) or type(reason).__name__}"
+                            ) from exc
     if len(data) > max_bytes:
-        raise InstallError(f"download failed: {url} is larger than {max_bytes} bytes")
+        raise DownloadError(f"download failed: {url} is larger than {max_bytes} bytes",
+                            retryable=False)
+    if expected is not None and expected.isdigit() and len(data) < int(expected):
+        raise DownloadError(f"download failed: {url}: connection closed after {len(data)} "
+                            f"of {expected} bytes")
     return data
+
+
+def fetch_with_retry(url: str, timeout: float, attempts: int = 1, retry_delay: float = 1.0,
+                     report: Report = None) -> bytes:
+    """fetch(), trying a network failure again up to `attempts` times in all, waiting
+    retry_delay, then twice as long, and so on (threat D9: a brief outage is not a failed
+    update)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return fetch(url, timeout)
+        except DownloadError as exc:
+            if not exc.retryable or attempt == attempts:
+                if attempts > 1 and exc.retryable:
+                    raise DownloadError(f"{exc} (after {attempts} attempts)") from exc
+                raise
+            delay = retry_delay * 2 ** (attempt - 1)
+            if report:
+                report(f"{exc}; trying again in {delay:g}s (attempt {attempt + 1} of {attempts})")
+            time.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 @dataclass(frozen=True)
@@ -162,11 +204,13 @@ class Download:
 
 def download_verified(manifest_url: str, signature_url: str, package_url: str,
                       public_key: Ed25519PublicKey, version: str, sha256: str,
-                      timeout: float, report: Report = None) -> Download:
+                      timeout: float, report: Report = None, attempts: int = 1,
+                      retry_delay: float = 1.0) -> Download:
     """Fetch and verify a package. The manifest is checked before the package is fetched,
-    so a forged or mismatched command never causes the package itself to be downloaded."""
+    so a forged or mismatched command never causes the package itself to be downloaded.
+    Each file is tried up to `attempts` times if the network fails (fetch_with_retry)."""
     def get(url: str, what: str) -> bytes:
-        data = fetch(url, timeout)
+        data = fetch_with_retry(url, timeout, attempts, retry_delay, report)
         if report:
             report(f"downloaded {what} ({len(data)} bytes) from {url}")
         return data
@@ -266,22 +310,14 @@ class Store:
         fields = verify_package(manifest=download.manifest, signature=download.signature,
                                 package=download.package, public_key=self.public_key,
                                 expected_version=version, report=report)
-        entrypoint = fields.get("entrypoint", "main.py")
-        if not isinstance(entrypoint, str) or "/" in entrypoint or entrypoint in ("", ".", ".."):
-            raise InstallError(f"manifest entrypoint {entrypoint!r} is not a file name")
-
         staging = self.versions_dir / f".{version}.new"
         shutil.rmtree(staging, ignore_errors=True)
-        (staging / APP_DIR).mkdir(parents=True)
+        staging.mkdir(parents=True)
         try:
-            with tarfile.open(fileobj=io.BytesIO(download.package), mode="r:gz") as tar:
-                tar.extractall(staging / APP_DIR, filter="data")
-        except (tarfile.TarError, OSError, EOFError) as exc:
+            _unpack(download.package, _entrypoint(fields), staging / APP_DIR)
+        except InstallError:
             shutil.rmtree(staging, ignore_errors=True)
-            raise InstallError(f"could not unpack the package: {exc}") from exc
-        if not (staging / APP_DIR / entrypoint).is_file():
-            shutil.rmtree(staging, ignore_errors=True)
-            raise InstallError(f"package has no {entrypoint}")
+            raise
         (staging / MANIFEST_FILE).write_bytes(download.manifest)
         (staging / SIGNATURE_FILE).write_bytes(download.signature)
         (staging / PACKAGE_FILE).write_bytes(download.package)
@@ -296,6 +332,32 @@ class Store:
                 os.replace(final / SNAPSHOT_DIR, staging / SNAPSHOT_DIR)
             shutil.rmtree(final)
         os.replace(staging, final)
+        return self.installed(version)
+
+    def refresh_app(self, version: str, report: Report = None) -> Installed:
+        """Unpack app/ again from the stored package, after verifying it, and return it.
+
+        Called just before a version is started (with no firmware running), so whatever is
+        in the unpacked folder is discarded: firmware runs as the agent's user and could have
+        edited it (threat T3). The package is read once and the same bytes are verified and
+        unpacked. Raises VerificationError, InstallError or OSError.
+        """
+        folder = self.versions_dir / version
+        download = Download((folder / MANIFEST_FILE).read_bytes(),
+                            (folder / SIGNATURE_FILE).read_bytes(),
+                            (folder / PACKAGE_FILE).read_bytes())
+        fields = verify_package(manifest=download.manifest, signature=download.signature,
+                                package=download.package, public_key=self.public_key,
+                                expected_version=version, report=report)
+        fresh = folder / f".{APP_DIR}.new"
+        old = folder / f".{APP_DIR}.old"
+        shutil.rmtree(fresh, ignore_errors=True)
+        _unpack(download.package, _entrypoint(fields), fresh)
+        shutil.rmtree(old, ignore_errors=True)
+        if (folder / APP_DIR).exists():
+            os.replace(folder / APP_DIR, old)
+        os.replace(fresh, folder / APP_DIR)
+        shutil.rmtree(old, ignore_errors=True)
         return self.installed(version)
 
     def installed(self, version: str) -> Installed:
@@ -350,6 +412,27 @@ class Store:
         installed = self.install_from_folder(factory[-1], report)
         self.set_current(installed.version)
         return installed
+
+
+def _entrypoint(fields: dict) -> str:
+    entrypoint = fields.get("entrypoint", "main.py")
+    if not isinstance(entrypoint, str) or "/" in entrypoint or entrypoint in ("", ".", ".."):
+        raise InstallError(f"manifest entrypoint {entrypoint!r} is not a file name")
+    return entrypoint
+
+
+def _unpack(package: bytes, entrypoint: str, dest: Path) -> None:
+    """Unpack a verified package into the new folder `dest`; it must contain `entrypoint`."""
+    dest.mkdir(parents=True)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(package), mode="r:gz") as tar:
+            tar.extractall(dest, filter="data")
+    except (tarfile.TarError, OSError, EOFError) as exc:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise InstallError(f"could not unpack the package: {exc}") from exc
+    if not (dest / entrypoint).is_file():
+        shutil.rmtree(dest, ignore_errors=True)
+        raise InstallError(f"package has no {entrypoint}")
 
 
 def _copy_folder(src: Path, dest: Path) -> None:

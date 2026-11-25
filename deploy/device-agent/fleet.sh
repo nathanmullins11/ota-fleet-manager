@@ -184,7 +184,7 @@ cmd_up() {
                     -e MQTT_PASSWORD="$(device_password "$id")" \
                     -v "$ca:/run/ota/ca.crt:ro" -e MQTT_CA_CERT=/run/ota/ca.crt \
                     -e HEARTBEAT_INTERVAL_SECONDS="${HEARTBEAT_INTERVAL_SECONDS:-5}" \
-                    -e LOG_LEVEL="${LOG_LEVEL:-INFO}" \
+                    -e LOG_LEVEL="${LOG_LEVEL:-INFO}" -e REGISTRY_URL="${REGISTRY_URL:-}" \
                     "$IMAGE" >/dev/null || die "Could not start $id."
                 ;;
             *) docker start "$name" >/dev/null || die "Could not start $id." ;;

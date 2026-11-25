@@ -587,7 +587,8 @@ wait_rollouts_idle() {
 }
 
 # cli ARGS...: the orchestrator's rollout CLI (control plane on this machine only).
-cli() { cp_compose exec -T orchestrator python cli.py "$@"; }
+# The operator is recorded with each rollout decision (threat R2).
+cli() { cp_compose exec -T -e OTA_OPERATOR="${OTA_OPERATOR:-${USER:-demo}}" orchestrator python cli.py "$@"; }
 
 # tools_run ARGS...: python in the tools image, with the repository mounted read-only.
 tools_run() {

@@ -1,7 +1,7 @@
 """STRIDE threats checked without running services: parsers, the installer, configuration.
 
-IDs (S1, T2, ...) refer to the threat table in docs/threat-model.md. Tests marked
-open_gap(...) describe the secure behaviour for a threat that is still open.
+IDs (S1, T2, ...) refer to the threat table in docs/threat-model.md. Every threat checked
+here is mitigated, so each test guards against a regression.
 """
 import json
 import re
@@ -9,8 +9,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
-from .stride import open_gap
 
 pytestmark = [pytest.mark.unit, pytest.mark.security]
 
@@ -191,10 +189,11 @@ def test_R1_every_rollout_change_is_logged_with_a_time(read_repo):
     assert {"rollout_id", "event", "reason", "created_at"} <= cols
 
 
-@open_gap("R2", "rollout events record what happened but not which operator asked for it")
 def test_R2_operator_actions_record_who_did_them(read_repo):
     cols = columns(read_repo("deploy/registries/postgres/init.sql"), "rollout_events")
-    assert cols & {"actor", "operator", "requested_by"}
+    assert "actor" in cols
+    migration = read_repo("deploy/registries/postgres/migrations/005_operator.sql")
+    assert "ADD COLUMN IF NOT EXISTS actor" in migration     # existing databases too
 
 
 # =========================================================================== I: Information disclosure
@@ -255,6 +254,7 @@ def test_I4_firmware_does_not_inherit_agent_secrets(firmware_runner, monkeypatch
 class FakeResponse:
     def __init__(self, size):
         self.size = size
+        self.headers = {"Content-Length": str(size)}
 
     def read(self, n):
         return b"x" * min(n, self.size)
@@ -314,7 +314,6 @@ def test_E1_device_agent_runs_as_non_root(read_repo):
     assert runs_as_non_root(read_repo("deploy/device-agent/Dockerfile"))
 
 
-@open_gap("E1", "the orchestrator and software registry containers run as root")
 @pytest.mark.parametrize("dockerfile", ["deploy/orchestrator/Dockerfile",
                                         "deploy/registries/software/Dockerfile"])
 def test_E1_control_plane_services_run_as_non_root(read_repo, dockerfile):

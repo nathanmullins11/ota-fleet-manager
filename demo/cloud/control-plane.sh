@@ -203,13 +203,13 @@ run_key_action() {
     case "$1" in
         u)
             printf '$ cli.py rollout start 2.0 --all --stages 1,3,6\n'
-            cp_compose exec -T orchestrator python cli.py rollout start 2.0 --all --stages 1,3,6 2>&1 \
+            cp_compose exec -T -e OTA_OPERATOR="${OTA_OPERATOR:-${USER:-presenter}}" orchestrator python cli.py rollout start 2.0 --all --stages 1,3,6 2>&1 \
                 | grep -v -E "^$|Follow it|cli.py rollout status"
             ;;
         f)
             # Errors up to 50 allowed, so the crash is what triggers the automatic rollback.
             printf '$ cli.py rollout start 2.1 --all --stages 3,3,4 --max-errors 50\n'
-            cp_compose exec -T orchestrator python cli.py rollout start 2.1 --all --stages 3,3,4 \
+            cp_compose exec -T -e OTA_OPERATOR="${OTA_OPERATOR:-${USER:-presenter}}" orchestrator python cli.py rollout start 2.1 --all --stages 3,3,4 \
                 --max-errors 50 2>&1 \
                 | grep -v -E "^$|Follow it|cli.py rollout status"
             ;;
